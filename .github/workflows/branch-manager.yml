@@ -1,0 +1,35 @@
+name: Branch Manager
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  ensure-branches:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure main/dev/sandbox branches exist
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          for branch in main dev sandbox; do
+            if git ls-remote --exit-code --heads origin "$branch" > /dev/null 2>&1; then
+              echo "Branch '$branch' already exists"
+            else
+              echo "Creating branch '$branch' from '$DEFAULT_BRANCH'"
+              git checkout -B "$branch" "origin/$DEFAULT_BRANCH"
+              git push origin "$branch"
+            fi
+          done

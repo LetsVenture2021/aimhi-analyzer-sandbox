@@ -1,0 +1,97 @@
+name: Main Deploy and Cloudflare Purge
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js (if package.json exists)
+        if: ${{ hashFiles('package.json') != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        if: ${{ hashFiles('package.json') != '' }}
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Run lint/test/typecheck when scripts exist
+        if: ${{ hashFiles('package.json') != '' }}
+        run: |
+          if node -e "const s=require('./package.json').scripts||{};process.exit(s['lint']?0:1)"; then
+            npm run lint
+          else
+            echo "No lint script"
+          fi
+
+          if node -e "const s=require('./package.json').scripts||{};process.exit(s['typecheck']?0:1)"; then
+            npm run typecheck
+          else
+            echo "No typecheck script"
+          fi
+
+          if node -e "const s=require('./package.json').scripts||{};process.exit(s['test']?0:1)"; then
+            npm test
+          else
+            echo "No test script"
+          fi
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: ci
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (optional)
+        if: ${{ secrets.GCP_SA_KEY != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud CLI (optional)
+        if: ${{ secrets.GCP_SA_KEY != '' }}
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Google Cloud Compute
+        env:
+          GCE_DEPLOY_COMMAND: ${{ vars.GCE_DEPLOY_COMMAND }}
+        run: |
+          if [ -z "$GCE_DEPLOY_COMMAND" ]; then
+            echo "GCE_DEPLOY_COMMAND repository variable is not set; skipping deployment command."
+            exit 0
+          fi
+          bash -lc "$GCE_DEPLOY_COMMAND"
+
+  cloudflare-purge:
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - name: Purge Cloudflare cache
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ZONE_ID" ]; then
+            echo "Cloudflare secrets missing; skipping cache purge."
+            exit 0
+          fi
+          auth_prefix="Authorization: Bearer "
+          auth_header="${auth_prefix}${CLOUDFLARE_API_TOKEN}"
+          curl -sS -X POST "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}/purge_cache" \
+            -H "$auth_header" \
+            -H "Content-Type: application/json" \
+            --data '{"purge_everything":true}'

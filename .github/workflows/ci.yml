@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js (if package.json exists)
+        if: ${{ hashFiles('package.json') != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        if: ${{ hashFiles('package.json') != '' }}
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Run lint/test/typecheck when scripts exist
+        if: ${{ hashFiles('package.json') != '' }}
+        run: |
+          if node -e "const s=require('./package.json').scripts||{};process.exit(s['lint']?0:1)"; then
+            npm run lint
+          else
+            echo "No lint script"
+          fi
+
+          if node -e "const s=require('./package.json').scripts||{};process.exit(s['typecheck']?0:1)"; then
+            npm run typecheck
+          else
+            echo "No typecheck script"
+          fi
+
+          if node -e "const s=require('./package.json').scripts||{};process.exit(s['test']?0:1)"; then
+            npm test
+          else
+            echo "No test script"
+          fi
+
+      - name: No project scripts configured
+        if: ${{ hashFiles('package.json') == '' }}
+        run: echo "No package.json found; CI completed with no runtime checks."
