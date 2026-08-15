@@ -1,0 +1,29 @@
+name: Chaos Testing
+
+on:
+  workflow_dispatch:
+
+jobs:
+  chaos:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Authenticate
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+
+      - name: Inject chaos
+        run: |
+          curl -X POST https://chaos.analyzer/api/inject \
+            -d '{"type":"latency_spike","duration":300}'
+
+      - name: Evaluate resilience
+        run: |
+          RES=$(curl -s https://metrics.analyzer/api/resilience)
+          echo "Resilience score: $RES"
