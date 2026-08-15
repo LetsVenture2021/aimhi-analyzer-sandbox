@@ -11,4 +11,8 @@ jobs:
     steps:
       - name: Run funnel analysis
         run: |
-          ./agents/user-experience-optimizer.sh "Analyze conversion funnel and propose optimization steps."
+          if [ -x ./agents/user-experience-optimizer.sh ]; then
+            ./agents/user-experience-optimizer.sh "Analyze conversion funnel and propose optimization steps."
+          else
+            echo "agents/user-experience-optimizer.sh not found or not executable; skipping funnel analysis."
+          fi
