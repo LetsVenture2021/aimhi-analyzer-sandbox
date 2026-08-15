@@ -1,0 +1,77 @@
+name: Automated Rollback Thresholds
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+env:
+  SERVICE_NAME: analyzer-api
+  REGION: us-central1
+  PROJECT_ID: aimhi-analyzer-sandbox
+
+jobs:
+  thresholds:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Fetch metrics
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          LATENCY="$(curl -fsS https://metrics.analyzer/api/latency)"
+          ERROR_RATE="$(curl -fsS https://metrics.analyzer/api/error-rate)"
+          TRAFFIC="$(curl -fsS https://metrics.analyzer/api/traffic-anomalies)"
+
+          echo "LATENCY=$LATENCY" >> "$GITHUB_ENV"
+          echo "ERROR_RATE=$ERROR_RATE" >> "$GITHUB_ENV"
+          echo "TRAFFIC=$TRAFFIC" >> "$GITHUB_ENV"
+
+      - name: Trigger rollback if thresholds exceeded
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$LATENCY" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            echo "Invalid LATENCY value: $LATENCY"
+            exit 1
+          fi
+
+          if ! [[ "$ERROR_RATE" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            echo "Invalid ERROR_RATE value: $ERROR_RATE"
+            exit 1
+          fi
+
+          if python3 - "$LATENCY" "$ERROR_RATE" "$TRAFFIC" <<'PY'
+import sys
+
+latency = float(sys.argv[1])
+error_rate = float(sys.argv[2])
+traffic = sys.argv[3].strip().lower()
+
+sys.exit(0 if (latency > 500 or error_rate > 0.05 or traffic == "anomaly") else 1)
+PY
+          then
+            bash ./agents/rollback.sh
+          else
+            echo "Thresholds not exceeded; no rollback required."
+          fi
