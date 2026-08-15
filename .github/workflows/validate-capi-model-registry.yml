@@ -43,11 +43,14 @@ jobs:
         shell: bash
         env:
           CAPI_MODELS_TOKEN: ${{ secrets.CAPI_MODELS_TOKEN }}
+          CAPI_MODELS_AUTH_HEADER: ${{ secrets.CAPI_MODELS_AUTH_HEADER }}
         run: |
           set -euo pipefail
 
           AUTH_HEADER=()
-          if [[ -n "${CAPI_MODELS_TOKEN:-}" ]]; then
+          if [[ -n "${CAPI_MODELS_AUTH_HEADER:-}" ]]; then
+            AUTH_HEADER=(-H "$CAPI_MODELS_AUTH_HEADER")
+          elif [[ -n "${CAPI_MODELS_TOKEN:-}" ]]; then
             AUTH_HEADER=(-H "Authorization: ******")
           fi
 
