@@ -1,0 +1,38 @@
+name: Apply Analyzer Autonomy IAM
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/apply_iam.yml"
+
+env:
+  GCP_PROJECT_ID: aimhi-analyzer-sandbox
+  LOGGING_SERVICE_ACCOUNT: service-784473183307@gcp-sa-logging.iam.gserviceaccount.com
+  CODING_AGENT_SERVICE_ACCOUNT: coding-agent@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+
+jobs:
+  apply-iam:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+      - name: Apply logging service account BigQuery binding
+        run: gcloud projects get-iam-policy "${{ env.GCP_PROJECT_ID }}" --flatten="bindings[].members" --filter="bindings.role=roles/bigquery.dataEditor AND bindings.members=serviceAccount:${{ env.LOGGING_SERVICE_ACCOUNT }}" --format="value(bindings.role)" | grep -qx "roles/bigquery.dataEditor" || gcloud projects add-iam-policy-binding "${{ env.GCP_PROJECT_ID }}" --member="serviceAccount:${{ env.LOGGING_SERVICE_ACCOUNT }}" --role="roles/bigquery.dataEditor"
+      - name: Apply coding agent Cloud Run admin binding
+        run: gcloud projects get-iam-policy "${{ env.GCP_PROJECT_ID }}" --flatten="bindings[].members" --filter="bindings.role=roles/run.admin AND bindings.members=serviceAccount:${{ env.CODING_AGENT_SERVICE_ACCOUNT }}" --format="value(bindings.role)" | grep -qx "roles/run.admin" || gcloud projects add-iam-policy-binding "${{ env.GCP_PROJECT_ID }}" --member="serviceAccount:${{ env.CODING_AGENT_SERVICE_ACCOUNT }}" --role="roles/run.admin"
+      - name: Apply coding agent Cloud Build editor binding
+        run: gcloud projects get-iam-policy "${{ env.GCP_PROJECT_ID }}" --flatten="bindings[].members" --filter="bindings.role=roles/cloudbuild.builds.editor AND bindings.members=serviceAccount:${{ env.CODING_AGENT_SERVICE_ACCOUNT }}" --format="value(bindings.role)" | grep -qx "roles/cloudbuild.builds.editor" || gcloud projects add-iam-policy-binding "${{ env.GCP_PROJECT_ID }}" --member="serviceAccount:${{ env.CODING_AGENT_SERVICE_ACCOUNT }}" --role="roles/cloudbuild.builds.editor"

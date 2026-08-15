@@ -1,0 +1,43 @@
+name: Run Analyzer Autonomy Validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/run_autonomy_tests.yml"
+      - "infra/cloudbuild/**"
+      - "infra/autonomy/**"
+
+env:
+  GCP_PROJECT_ID: aimhi-analyzer-sandbox
+  GCP_REGION: us-central1
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+      - name: Validate autonomy pipelines
+        run: gcloud builds submit --project="${{ env.GCP_PROJECT_ID }}" --config=infra/cloudbuild/validate-autonomy-pipelines.cloudbuild.yaml --substitutions=_REGION=${{ env.GCP_REGION }},_TARGET=autonomy-pipelines
+      - name: Validate telemetry emitter
+        run: gcloud builds submit --project="${{ env.GCP_PROJECT_ID }}" --config=infra/cloudbuild/validate-telemetry-emitter.cloudbuild.yaml --substitutions=_REGION=${{ env.GCP_REGION }},_TARGET=telemetry-emitter
+      - name: Validate dashboards
+        run: gcloud builds submit --project="${{ env.GCP_PROJECT_ID }}" --config=infra/cloudbuild/validate-dashboards.cloudbuild.yaml --substitutions=_REGION=${{ env.GCP_REGION }},_TARGET=autonomy-dashboards
+      - name: Validate Looker models
+        run: gcloud builds submit --project="${{ env.GCP_PROJECT_ID }}" --config=infra/cloudbuild/validate-looker-models.cloudbuild.yaml --substitutions=_REGION=${{ env.GCP_REGION }},_TARGET=autonomy-looker
