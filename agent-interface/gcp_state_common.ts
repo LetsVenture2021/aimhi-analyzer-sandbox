@@ -86,7 +86,7 @@ export async function runJsonCommand(command: string, allowFailure = false): Pro
 }
 
 export async function assertServiceAccountExecution(): Promise<string> {
-  const command = "gcloud auth list --filter=status:ACTIVE --format=value(account)";
+  const command = "gcloud auth list --filter=status:ACTIVE --format='value(account)'";
   const result = await runCommand(command);
   const account = result.stdout.trim();
   const isServiceAccount = /^[^@\s]+@[^@\s]+\.gserviceaccount\.com$/.test(account);
