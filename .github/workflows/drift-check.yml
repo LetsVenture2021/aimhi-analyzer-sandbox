@@ -1,0 +1,28 @@
+name: Infra Drift Check
+
+on:
+  schedule:
+    - cron: "0 */6 * * *" # every 6 hours
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+
+      - name: Check IAM drift
+        run: |
+          gcloud projects get-iam-policy aimhi-analyzer-sandbox > current-iam.txt
+          diff current-iam.txt infra/expected-iam.txt || echo "IAM drift detected"
