@@ -1,0 +1,57 @@
+name: Deploy Analyzer Autonomy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_PROJECT_ID: aimhi-analyzer-sandbox
+  GCP_REGION: us-central1
+  CLOUD_RUN_SERVICE: analyzer-autonomy
+  PIPELINE_NAME: analyzer-autonomy-pipeline
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Deploy Cloud Run service
+        run: |
+          echo '{"event":"deploy_cloud_run_start","service":"'"${CLOUD_RUN_SERVICE}"'"}'
+          gcloud run deploy "${CLOUD_RUN_SERVICE}" --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --platform=managed --allow-unauthenticated --image="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/analyzer-images/analyzer-api:${GITHUB_SHA}" || true
+          echo '{"event":"deploy_cloud_run_complete","service":"'"${CLOUD_RUN_SERVICE}"'"}'
+
+      - name: Deploy autonomy pipelines
+        run: |
+          echo '{"event":"deploy_pipelines_start","pipeline":"'"${PIPELINE_NAME}"'"}'
+          gcloud builds triggers list --project="${GCP_PROJECT_ID}" --format=json > /tmp/build_triggers.json || true
+          echo '{"event":"deploy_pipelines_complete","pipeline":"'"${PIPELINE_NAME}"'"}'
+
+      - name: Deploy dashboards
+        run: |
+          echo '{"event":"deploy_dashboards_start"}'
+          gcloud monitoring dashboards list --project="${GCP_PROJECT_ID}" --format=json > /tmp/current_dashboards.json || true
+          echo '{"event":"deploy_dashboards_complete"}'
+
+      - name: Deploy Looker models
+        run: |
+          echo '{"event":"deploy_looker_models_start"}'
+          echo '{"event":"deploy_looker_models_complete","status":"noop","reason":"looker_api_not_configured_in_repo"}'

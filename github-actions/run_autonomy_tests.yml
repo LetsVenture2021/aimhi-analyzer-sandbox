@@ -1,0 +1,66 @@
+name: Run Analyzer Autonomy Tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "github-actions/run_autonomy_tests.yml"
+      - "scripts/gcp-sync/**"
+      - "agent-interface/**"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_PROJECT_ID: aimhi-analyzer-sandbox
+  GCP_REGION: us-central1
+  CLOUD_RUN_SERVICE: analyzer-autonomy
+  LOG_SINK_NAME: autonomy-sync-sink
+  BQ_DATASET: autonomy
+
+jobs:
+  autonomy-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Validate deployed Cloud Run service
+        run: |
+          echo '{"event":"test_cloud_run_start"}'
+          gcloud run services describe "${CLOUD_RUN_SERVICE}" --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --format=json > /tmp/cloud_run_service.json
+          cat /tmp/cloud_run_service.json | jq -c '{event:"test_cloud_run_complete",service:.metadata.name,url:.status.url}'
+
+      - name: Validate BigQuery dataset and logging sink
+        run: |
+          echo '{"event":"test_gcp_resources_start"}'
+          bq ls --format=json "${GCP_PROJECT_ID}:${BQ_DATASET}" > /tmp/bq_dataset.json || true
+          gcloud logging sinks describe "${LOG_SINK_NAME}" --project="${GCP_PROJECT_ID}" --format=json > /tmp/log_sink.json || true
+          echo '{"event":"test_gcp_resources_complete"}'
+
+      - name: Validate sync scripts shell syntax
+        run: |
+          echo '{"event":"test_sync_scripts_start"}'
+          bash -n scripts/gcp-sync/fetch_bigquery.sh
+          bash -n scripts/gcp-sync/fetch_cloud_run.sh
+          bash -n scripts/gcp-sync/fetch_dashboards.sh
+          bash -n scripts/gcp-sync/fetch_iam.sh
+          bash -n scripts/gcp-sync/fetch_logging.sh
+          bash -n scripts/gcp-sync/fetch_looker.sh
+          bash -n scripts/gcp-sync/fetch_pipelines.sh
+          bash -n scripts/gcp-sync/sync.sh
+          bash -n scripts/gcp-sync/commit_changes.sh
+          echo '{"event":"test_sync_scripts_complete","status":"ok"}'

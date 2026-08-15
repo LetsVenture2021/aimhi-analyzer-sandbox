@@ -1,0 +1,46 @@
+name: Apply Analyzer BigQuery
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "config/bigquery/**"
+      - "github-actions/apply_bigquery.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_PROJECT_ID: aimhi-analyzer-sandbox
+  BQ_DATASET: autonomy
+  BQ_TABLE: sync_audit
+
+jobs:
+  apply-bigquery:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Setup bq cli context
+        run: gcloud config set project "${GCP_PROJECT_ID}"
+
+      - name: Apply dataset and schema idempotently
+        run: |
+          echo '{"event":"apply_bigquery_start"}'
+          bq --location=US mk --dataset --if_not_exists "${GCP_PROJECT_ID}:${BQ_DATASET}"
+          if [ -f config/bigquery/sync_audit.schema.json ]; then bq mk --table --replace --schema=config/bigquery/sync_audit.schema.json "${GCP_PROJECT_ID}:${BQ_DATASET}.${BQ_TABLE}"; else bq mk --table --if_not_exists "${GCP_PROJECT_ID}:${BQ_DATASET}.${BQ_TABLE}" event_time:TIMESTAMP,source:STRING,target:STRING,status:STRING; fi
+          echo '{"event":"apply_bigquery_complete","dataset":"autonomy","table":"sync_audit"}'

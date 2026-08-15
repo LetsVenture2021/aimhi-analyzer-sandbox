@@ -1,0 +1,42 @@
+name: Apply Analyzer IAM
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "config/iam_bindings.json"
+      - "github-actions/apply_iam.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_PROJECT_ID: aimhi-analyzer-sandbox
+  DEFAULT_MEMBER: serviceAccount:github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+  DEFAULT_ROLE: roles/viewer
+
+jobs:
+  apply-iam:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Apply IAM bindings idempotently
+        run: |
+          echo '{"event":"apply_iam_start"}'
+          if [ -f config/iam_bindings.json ]; then jq -c '.bindings[]' config/iam_bindings.json | while read -r row; do member="$(echo "$row" | jq -r '.member')"; role="$(echo "$row" | jq -r '.role')"; gcloud projects add-iam-policy-binding "${GCP_PROJECT_ID}" --member="${member}" --role="${role}" --quiet; echo "{\"event\":\"apply_iam_binding\",\"member\":\"${member}\",\"role\":\"${role}\"}"; done; else gcloud projects add-iam-policy-binding "${GCP_PROJECT_ID}" --member="${DEFAULT_MEMBER}" --role="${DEFAULT_ROLE}" --quiet; echo '{"event":"apply_iam_binding","member":"serviceAccount:github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com","role":"roles/viewer"}'; fi
+          echo '{"event":"apply_iam_complete"}'
