@@ -6,6 +6,7 @@ on:
 jobs:
   segmentation:
     runs-on: ubuntu-latest
+    permissions: {}
 
     steps:
       - name: Run segmentation agent
