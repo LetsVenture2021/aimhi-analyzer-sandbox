@@ -1,0 +1,13 @@
+name: Conversion Funnel Optimization
+
+on:
+  workflow_dispatch:
+
+jobs:
+  funnel:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Run funnel analysis
+        run: |
+          ./agents/user-experience-optimizer.sh "Analyze conversion funnel and propose optimization steps."
