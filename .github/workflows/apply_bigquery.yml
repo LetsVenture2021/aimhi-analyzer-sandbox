@@ -1,0 +1,38 @@
+name: Apply Analyzer Autonomy BigQuery
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/apply_bigquery.yml"
+
+env:
+  GCP_PROJECT_ID: aimhi-analyzer-sandbox
+  BQ_LOCATION: US
+  DATASET_ID: analyzer_autonomy
+  TABLE_ID: telemetry_events
+  TELEMETRY_SCHEMA: event_timestamp:TIMESTAMP,event_id:STRING,pipeline_name:STRING,status:STRING,latency_ms:INT64,payload:STRING
+
+jobs:
+  apply-bigquery:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+      - name: Apply analyzer_autonomy dataset
+        run: bq --location="${{ env.BQ_LOCATION }}" ls --format=prettyjson "${{ env.GCP_PROJECT_ID }}:${{ env.DATASET_ID }}" >/dev/null 2>&1 || bq --location="${{ env.BQ_LOCATION }}" mk --dataset --description="Analyzer autonomy telemetry dataset" "${{ env.GCP_PROJECT_ID }}:${{ env.DATASET_ID }}"
+      - name: Apply telemetry table schema
+        run: bq show --format=prettyjson "${{ env.GCP_PROJECT_ID }}:${{ env.DATASET_ID }}.${{ env.TABLE_ID }}" >/dev/null 2>&1 && bq update --schema "${{ env.TELEMETRY_SCHEMA }}" "${{ env.GCP_PROJECT_ID }}:${{ env.DATASET_ID }}.${{ env.TABLE_ID }}" || bq mk --table --schema "${{ env.TELEMETRY_SCHEMA }}" "${{ env.GCP_PROJECT_ID }}:${{ env.DATASET_ID }}.${{ env.TABLE_ID }}"

@@ -1,0 +1,4 @@
+steps:
+- name: gcr.io/cloud-builders/gcloud
+  entrypoint: bash
+  args: ["-c", "chmod +x infra/autonomy/scripts/*.sh infra/autonomy/pipelines/*.sh && infra/autonomy/scripts/autonomy-master.sh"]

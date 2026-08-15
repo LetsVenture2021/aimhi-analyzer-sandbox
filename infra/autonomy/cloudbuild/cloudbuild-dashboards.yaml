@@ -1,0 +1,3 @@
+steps:
+- name: gcr.io/cloud-builders/gsutil
+  args: ["cp", "infra/autonomy/grafana/autonomy-dashboard.json", "gs://$PROJECT_ID-autonomy-dashboards/autonomy-dashboard.json"]

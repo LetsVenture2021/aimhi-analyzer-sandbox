@@ -1,0 +1,43 @@
+name: Apply Analyzer Logging
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "github-actions/apply_logging.yml"
+      - "config/logging/**"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_PROJECT_ID: aimhi-analyzer-sandbox
+  LOG_SINK_NAME: autonomy-sync-sink
+  SINK_DESTINATION: bigquery.googleapis.com/projects/aimhi-analyzer-sandbox/datasets/autonomy
+  SINK_FILTER: resource.type="cloud_run_revision" OR resource.type="bigquery_resource"
+
+jobs:
+  apply-logging:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Apply logging sink idempotently
+        run: |
+          echo '{"event":"apply_logging_start"}'
+          if gcloud logging sinks describe "${LOG_SINK_NAME}" --project="${GCP_PROJECT_ID}" --format=json >/tmp/sink.json 2>/tmp/sink_error.log; then gcloud logging sinks update "${LOG_SINK_NAME}" "${SINK_DESTINATION}" --project="${GCP_PROJECT_ID}" --log-filter="${SINK_FILTER}" --quiet; else gcloud logging sinks create "${LOG_SINK_NAME}" "${SINK_DESTINATION}" --project="${GCP_PROJECT_ID}" --log-filter="${SINK_FILTER}" --quiet; fi
+          echo '{"event":"apply_logging_complete","sink":"autonomy-sync-sink"}'

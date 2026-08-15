@@ -1,0 +1,37 @@
+name: Apply Analyzer Autonomy Logging
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/apply_logging.yml"
+
+env:
+  GCP_PROJECT_ID: aimhi-analyzer-sandbox
+  SINK_NAME: autonomy-telemetry-to-bq
+  DATASET_ID: analyzer_autonomy
+  SINK_FILTER: resource.type="cloud_run_revision" OR resource.type="build"
+
+jobs:
+  apply-logging:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+      - name: Create or keep logging sink autonomy-telemetry-to-bq
+        run: gcloud logging sinks describe "${{ env.SINK_NAME }}" --project="${{ env.GCP_PROJECT_ID }}" >/dev/null 2>&1 || gcloud logging sinks create "${{ env.SINK_NAME }}" "bigquery.googleapis.com/projects/${{ env.GCP_PROJECT_ID }}/datasets/${{ env.DATASET_ID }}" --log-filter='${{ env.SINK_FILTER }}' --project="${{ env.GCP_PROJECT_ID }}"
+      - name: Bind sink writer permissions
+        run: WRITER_IDENTITY="$(gcloud logging sinks describe "${{ env.SINK_NAME }}" --project="${{ env.GCP_PROJECT_ID }}" --format='value(writerIdentity)')"; gcloud projects add-iam-policy-binding "${{ env.GCP_PROJECT_ID }}" --member="${WRITER_IDENTITY}" --role="roles/bigquery.dataEditor"

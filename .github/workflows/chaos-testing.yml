@@ -1,0 +1,45 @@
+name: Chaos Testing
+
+on:
+  workflow_dispatch:
+
+jobs:
+  chaos:
+    runs-on: ubuntu-latest
+    env:
+      RESILIENCE_THRESHOLD: "0.8"
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Authenticate
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: aimhi-analyzer-sandbox
+
+      - name: Inject chaos
+        run: |
+          SERVICE_URL="$(gcloud run services describe analyzer-api --region us-central1 --project aimhi-analyzer-sandbox --format='value(status.url)')"
+          ID_TOKEN="$(gcloud auth print-identity-token --audiences="${SERVICE_URL}")"
+          curl -fSs -X POST "${SERVICE_URL}/api/inject" \
+            -H "Authorization: Bearer ${ID_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"type":"latency_spike","duration":300}'
+
+      - name: Evaluate resilience
+        run: |
+          SERVICE_URL="$(gcloud run services describe analyzer-api --region us-central1 --project aimhi-analyzer-sandbox --format='value(status.url)')"
+          ID_TOKEN="$(gcloud auth print-identity-token --audiences="${SERVICE_URL}")"
+          RES="$(curl -fSs "${SERVICE_URL}/api/resilience" -H "Authorization: Bearer ${ID_TOKEN}")"
+          SCORE="$(python -c 'import json,sys; data=json.loads(sys.argv[1]); print(data.get("score", data.get("resilience_score")))' "$RES")"
+          THRESHOLD=${RESILIENCE_THRESHOLD:-0.8}
+          echo "Resilience score: $SCORE (threshold: $THRESHOLD)"
+          python -c 'import sys; score=float(sys.argv[1]); threshold=float(sys.argv[2]); raise SystemExit(0 if score >= threshold else 1)' "$SCORE" "$THRESHOLD"
