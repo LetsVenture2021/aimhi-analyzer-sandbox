@@ -16,7 +16,8 @@ export async function fetchDashboardState(context: IngestContext): Promise<Recor
       continue;
     }
     const dashboard = await runJsonCommand(`gcloud monitoring dashboards describe ${shellEscape(dashboardRef.name)} --project=${projectEscaped} --format=json`, true);
-    const dashboardName = normalizeName(dashboardRef.displayName ?? dashboardRef.name);
+    const dashboardId = dashboardRef.name.split("/").pop() ?? dashboardRef.name;
+    const dashboardName = normalizeName(`${dashboardRef.displayName ?? "dashboard"}-${dashboardId}`);
     const fileName = `${dashboardName}.json`;
     await writeJson(path.join(outputDir, fileName), dashboard);
     exportedDashboards.push({ name: dashboardRef.name, displayName: dashboardRef.displayName ?? dashboardRef.name, fileName });
