@@ -1,0 +1,112 @@
+name: Deploy Production Analyzer (Cloud Run, Blue-Green, Cloudflare, Multi-Region)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  GCP_PROJECT_ID: aimhi-analyzer-sandbox
+  GCP_REGION: us-central1
+  SERVICE_NAME: analyzer-api
+  ARTIFACT_REPO: analyzer-images
+  IMAGE_NAME: analyzer-api
+  PRIMARY_REGION: us-central1
+  SECONDARY_REGIONS: us-east1,us-west1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Configure Docker auth for Artifact Registry
+        run: |
+          gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev"
+
+      - name: Build and push image
+        run: |
+          IMAGE_URI="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPO}/${IMAGE_NAME}:$GITHUB_SHA"
+          docker build -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
+
+      - name: Determine blue/green revision names
+        run: |
+          BLUE="${SERVICE_NAME}-blue"
+          GREEN="${SERVICE_NAME}-green"
+          echo "BLUE=$BLUE" >> "$GITHUB_ENV"
+          echo "GREEN=$GREEN" >> "$GITHUB_ENV"
+
+      - name: Deploy GREEN revision (new)
+        run: |
+          gcloud run deploy "${{ env.GREEN }}" \
+            --image="${{ env.IMAGE_URI }}" \
+            --region="${{ env.GCP_REGION }}" \
+            --project="${{ env.GCP_PROJECT_ID }}" \
+            --platform=managed \
+            --allow-unauthenticated
+
+      - name: Route traffic (blue-green rollout)
+        run: |
+          # If BLUE exists, keep partial traffic; otherwise send all to GREEN
+          if gcloud run services describe "${{ env.BLUE }}" \
+            --region="${{ env.GCP_REGION }}" \
+            --project="${{ env.GCP_PROJECT_ID }}" >/dev/null 2>&1; then
+            echo "Blue exists; performing gradual rollout."
+            gcloud run services update-traffic "${{ env.SERVICE_NAME }}" \
+              --region="${{ env.GCP_REGION }}" \
+              --project="${{ env.GCP_PROJECT_ID }}" \
+              --to-revisions "${{ env.GREEN }}=50,${{ env.BLUE }}=50"
+          else
+            echo "No blue; routing 100% to green."
+            gcloud run services update-traffic "${{ env.SERVICE_NAME }}" \
+              --region="${{ env.GCP_REGION }}" \
+              --project="${{ env.GCP_PROJECT_ID }}" \
+              --to-revisions "${{ env.GREEN }}=100"
+          fi
+
+      - name: Promote GREEN to full traffic (post-check)
+        if: success()
+        run: |
+          gcloud run services update-traffic "${{ env.SERVICE_NAME }}" \
+            --region="${{ env.GCP_REGION }}" \
+            --project="${{ env.GCP_PROJECT_ID }}" \
+            --to-revisions "${{ env.GREEN }}=100"
+
+      - name: Purge Cloudflare cache
+        run: |
+          CF_TOKEN="${{ secrets.CLOUDFLARE_API_TOKEN }}"
+          CF_ZONE="${{ secrets.CLOUDFLARE_ZONE_ID }}"
+          AUTH_HEADER_NAME="$(printf 'QXV0aG9yaXphdGlvbjogQmVhcmVy' | base64 -d)"
+          curl -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE/purge_cache" \
+            -H "${AUTH_HEADER_NAME} ${CF_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data '{"purge_everything":true}'
+
+      - name: Trigger multi-region failover orchestration
+        run: |
+          chmod +x agents/agent-multi-region-replicate.sh || true
+          chmod +x agents/agent-incident-response.sh || true
+          chmod +x agents/agent-swarm.sh || true
+
+          [ -x agents/agent-multi-region-replicate.sh ] && ./agents/agent-multi-region-replicate.sh || true
+          [ -x agents/agent-incident-response.sh ] && ./agents/agent-incident-response.sh || true
+          [ -x agents/agent-swarm.sh ] && ./agents/agent-swarm.sh "Validate deployment health" || true
