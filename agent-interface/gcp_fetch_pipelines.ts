@@ -62,7 +62,7 @@ function renderYaml(data: unknown, indent = 0): string {
     return `${pad}null`;
   }
   if (typeof data === "string") {
-    return `${pad}"${data.replace(/"/g, '\\"')}"`;
+    return `${pad}"${escapeYamlString(data)}"`;
   }
   if (typeof data === "number" || typeof data === "boolean") {
     return `${pad}${String(data)}`;
@@ -99,4 +99,8 @@ function renderYaml(data: unknown, indent = 0): string {
       .join("\n");
   }
   return `${pad}"${String(data)}"`;
+}
+
+function escapeYamlString(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
