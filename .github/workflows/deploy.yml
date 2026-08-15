@@ -1,0 +1,39 @@
+name: Verify Google Cloud deployment identity
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
+  GCP_SA: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+
+jobs:
+  verify-identity:
+    if: github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.fork == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify WIF provider secret
+        run: |
+          if [ -z "$WIF_PROVIDER" ]; then
+            echo "ERROR: GCP_WIF_PROVIDER secret is missing or empty"
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud via WIF
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.GCP_SA }}
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Verify gcloud identity
+        run: |
+          gcloud auth list
+          gcloud config list
