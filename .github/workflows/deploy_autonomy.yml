@@ -1,0 +1,43 @@
+name: Deploy Analyzer Autonomy System
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/deploy_autonomy.yml"
+      - "infra/cloudbuild/**"
+      - "infra/autonomy/**"
+
+env:
+  GCP_PROJECT_ID: aimhi-analyzer-sandbox
+  GCP_REGION: us-central1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+      - name: Deploy Cloud Run autonomy service
+        run: gcloud builds submit --project="${{ env.GCP_PROJECT_ID }}" --config=infra/cloudbuild/autonomy-service.cloudbuild.yaml --substitutions=_REGION=${{ env.GCP_REGION }},_SERVICE_NAME=autonomy-service
+      - name: Deploy autonomy pipelines
+        run: gcloud builds submit --project="${{ env.GCP_PROJECT_ID }}" --config=infra/cloudbuild/autonomy-pipelines.cloudbuild.yaml --substitutions=_REGION=${{ env.GCP_REGION }},_PIPELINE_ENV=prod
+      - name: Deploy telemetry emitter
+        run: gcloud builds submit --project="${{ env.GCP_PROJECT_ID }}" --config=infra/cloudbuild/telemetry-emitter.cloudbuild.yaml --substitutions=_REGION=${{ env.GCP_REGION }},_EMITTER_NAME=autonomy-telemetry-emitter
+      - name: Deploy dashboards
+        run: gcloud builds submit --project="${{ env.GCP_PROJECT_ID }}" --config=infra/cloudbuild/autonomy-dashboards.cloudbuild.yaml --substitutions=_REGION=${{ env.GCP_REGION }},_DASHBOARD_SET=autonomy
+      - name: Deploy Looker models
+        run: gcloud builds submit --project="${{ env.GCP_PROJECT_ID }}" --config=infra/cloudbuild/autonomy-looker-models.cloudbuild.yaml --substitutions=_REGION=${{ env.GCP_REGION }},_LOOKER_FOLDER=autonomy
