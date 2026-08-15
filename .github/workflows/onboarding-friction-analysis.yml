@@ -6,6 +6,7 @@ on:
 jobs:
   friction:
     runs-on: ubuntu-latest
+    permissions: {}
 
     steps:
       - name: Run UX agent
