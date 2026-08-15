@@ -31,14 +31,24 @@ function pipelineYamlFromTrigger(trigger: BuildTrigger): string {
   lines.push(`definition_file: ${yamlScalar(trigger.filename ?? "")}`);
   lines.push(`service_account: ${yamlScalar(trigger.serviceAccount ?? "")}`);
   lines.push(`created_at: ${yamlScalar(trigger.createTime ?? "")}`);
-  lines.push("tags:");
-  for (const tag of trigger.tags ?? []) {
-    lines.push(`  - ${yamlScalar(tag)}`);
+  const tags = trigger.tags ?? [];
+  if (tags.length === 0) {
+    lines.push("tags: []");
+  } else {
+    lines.push("tags:");
+    for (const tag of tags) {
+      lines.push(`  - ${yamlScalar(tag)}`);
+    }
   }
-  lines.push("substitutions:");
   const substitutions = trigger.substitutions ?? {};
-  for (const [key, value] of Object.entries(substitutions)) {
-    lines.push(`  ${key}: ${yamlScalar(value)}`);
+  const substitutionEntries = Object.entries(substitutions);
+  if (substitutionEntries.length === 0) {
+    lines.push("substitutions: {}");
+  } else {
+    lines.push("substitutions:");
+    for (const [key, value] of substitutionEntries) {
+      lines.push(`  ${key}: ${yamlScalar(value)}`);
+    }
   }
   return `${lines.join("\n")}\n`;
 }
