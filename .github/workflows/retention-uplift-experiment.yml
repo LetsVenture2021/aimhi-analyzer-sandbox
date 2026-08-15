@@ -1,0 +1,14 @@
+name: Retention Uplift Experiment
+
+on:
+  workflow_dispatch:
+
+jobs:
+  retention:
+    runs-on: ubuntu-latest
+    permissions: {}
+
+    steps:
+      - name: Run retention uplift agent
+        run: |
+          ./agents/user-experience-optimizer.sh "Design retention uplift experiments and propose A/B tests."
