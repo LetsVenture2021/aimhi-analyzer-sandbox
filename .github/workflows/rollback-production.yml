@@ -1,0 +1,105 @@
+name: Rollback Production Analyzer (Blue-Green + Cloudflare + Failover)
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Deploy Production Analyzer (Cloud Run, Blue-Green, Cloudflare, Multi-Region)"]
+    types:
+      - completed
+
+env:
+  GCP_PROJECT_ID: aimhi-analyzer-sandbox
+  GCP_REGION: us-central1
+  SERVICE_NAME: analyzer-api
+  PRIMARY_REGION: us-central1
+  SECONDARY_REGIONS: us-east1,us-west1
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Identify BLUE and GREEN revisions
+        run: |
+          BLUE="${SERVICE_NAME}-blue"
+          GREEN="${SERVICE_NAME}-green"
+          echo "BLUE=$BLUE" >> "$GITHUB_ENV"
+          echo "GREEN=$GREEN" >> "$GITHUB_ENV"
+
+      - name: Run health check on GREEN revision
+        id: health
+        run: |
+          GREEN_URL=$(gcloud run services describe "${{ env.GREEN }}" \
+            --region="${{ env.GCP_REGION }}" \
+            --project="${{ env.GCP_PROJECT_ID }}" \
+            --format="value(status.url)")
+
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$GREEN_URL")
+          echo "GREEN_STATUS=$STATUS" >> "$GITHUB_ENV"
+
+          if [[ "$STATUS" != "200" ]]; then
+            echo "status=unhealthy" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=healthy" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rollback if GREEN is unhealthy
+        if: steps.health.outputs.status == 'unhealthy'
+        run: |
+          echo "GREEN revision unhealthy. Rolling back to BLUE."
+          gcloud run services update-traffic "${{ env.SERVICE_NAME }}" \
+            --region="${{ env.GCP_REGION }}" \
+            --project="${{ env.GCP_PROJECT_ID }}" \
+            --to-revisions "${{ env.BLUE }}=100"
+
+      - name: Purge Cloudflare cache after rollback
+        if: steps.health.outputs.status == 'unhealthy'
+        run: |
+          CF_TOKEN="${{ secrets.CLOUDFLARE_API_TOKEN }}"
+          CF_ZONE="${{ secrets.CLOUDFLARE_ZONE_ID }}"
+          curl -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE/purge_cache" \
+            -H "Authorization: ******" \
+            -H "Content-Type: application/json" \
+            --data '{"purge_everything":true}'
+
+      - name: Trigger incident response agent
+        if: steps.health.outputs.status == 'unhealthy'
+        run: |
+          chmod +x agents/agent-incident-response.sh || true
+          [ -x agents/agent-incident-response.sh ] && ./agents/agent-incident-response.sh || true
+
+      - name: Trigger multi-region failover
+        if: steps.health.outputs.status == 'unhealthy'
+        run: |
+          chmod +x agents/agent-multi-region-replicate.sh || true
+          [ -x agents/agent-multi-region-replicate.sh ] && ./agents/agent-multi-region-replicate.sh || true
+
+      - name: Log rollback event
+        if: steps.health.outputs.status == 'unhealthy'
+        run: |
+          TS=$(date -Iseconds)
+          echo "Rollback executed at $TS due to unhealthy GREEN revision" \
+            | gcloud logging write analyzer-rollback-log --payload-type=basic
+
+      - name: No rollback needed
+        if: steps.health.outputs.status == 'healthy'
+        run: |
+          echo "GREEN revision healthy. No rollback performed."
