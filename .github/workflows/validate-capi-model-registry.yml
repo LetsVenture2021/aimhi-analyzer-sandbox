@@ -1,0 +1,96 @@
+name: Validate Copilot CAPI Model Registry
+
+on:
+  workflow_dispatch:
+    inputs:
+      models_url:
+        description: "Optional override for the /models endpoint URL"
+        required: false
+        type: string
+      required_models:
+        description: "Comma-separated required model IDs"
+        required: false
+        default: "claude-sonnet-4.6,capi-prod-claude-sonnet-4.6"
+        type: string
+  schedule:
+    - cron: "0 */6 * * *"
+
+jobs:
+  validate-models:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Resolve endpoint and required models
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MODELS_URL="${{ github.event.inputs.models_url || vars.CAPI_MODELS_URL }}"
+          REQUIRED_MODELS="${{ github.event.inputs.required_models || 'claude-sonnet-4.6,capi-prod-claude-sonnet-4.6' }}"
+
+          if [[ -z "$MODELS_URL" ]]; then
+            echo "Missing models URL. Set repository variable CAPI_MODELS_URL or pass workflow_dispatch input models_url."
+            exit 1
+          fi
+
+          echo "MODELS_URL=$MODELS_URL" >> "$GITHUB_ENV"
+          echo "REQUIRED_MODELS=$REQUIRED_MODELS" >> "$GITHUB_ENV"
+
+      - name: Fetch /models payload
+        shell: bash
+        env:
+          CAPI_MODELS_TOKEN: ${{ secrets.CAPI_MODELS_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          AUTH_HEADER=()
+          if [[ -n "${CAPI_MODELS_TOKEN:-}" ]]; then
+            AUTH_HEADER=(-H "Authorization: ******")
+          fi
+
+          curl -fsS "${AUTH_HEADER[@]}" "$MODELS_URL" > models.json
+          echo "Fetched model registry payload from $MODELS_URL"
+
+      - name: Validate required model IDs and aliases
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          with open("models.json", "r", encoding="utf-8") as f:
+              payload = json.load(f)
+
+          required = [m.strip() for m in os.environ["REQUIRED_MODELS"].split(",") if m.strip()]
+          found = set()
+
+          def harvest(node):
+              if isinstance(node, dict):
+                  for key in ("id", "name", "model", "model_id", "alias"):
+                      value = node.get(key)
+                      if isinstance(value, str) and value.strip():
+                          found.add(value.strip())
+                  for value in node.values():
+                      harvest(value)
+              elif isinstance(node, list):
+                  for item in node:
+                      harvest(item)
+              elif isinstance(node, str):
+                  found.add(node.strip())
+
+          harvest(payload)
+
+          missing = [m for m in required if m not in found]
+          if missing:
+              print("Missing required model IDs/aliases:", ", ".join(missing))
+              print("Ensure `/models` includes the canonical model and alias mapping.")
+              sys.exit(1)
+
+          print("All required models/aliases are present:", ", ".join(required))
+          PY
