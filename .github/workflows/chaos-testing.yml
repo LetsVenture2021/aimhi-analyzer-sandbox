@@ -18,12 +18,19 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
 
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: aimhi-analyzer-sandbox
+
       - name: Inject chaos
         run: |
-          curl -X POST https://chaos.analyzer/api/inject \
+          SERVICE_URL="$(gcloud run services describe analyzer-api --region us-central1 --project aimhi-analyzer-sandbox --format='value(status.url)')"
+          curl -X POST "${SERVICE_URL}/api/inject" \
             -d '{"type":"latency_spike","duration":300}'
 
       - name: Evaluate resilience
         run: |
-          RES=$(curl -s https://metrics.analyzer/api/resilience)
+          SERVICE_URL="$(gcloud run services describe analyzer-api --region us-central1 --project aimhi-analyzer-sandbox --format='value(status.url)')"
+          RES=$(curl -s "${SERVICE_URL}/api/resilience")
           echo "Resilience score: $RES"
