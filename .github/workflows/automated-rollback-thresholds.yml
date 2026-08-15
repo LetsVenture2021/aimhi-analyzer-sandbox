@@ -1,0 +1,77 @@
+name: Automated Rollback Thresholds
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+env:
+  SERVICE_NAME: analyzer-api
+  REGION: us-central1
+  PROJECT_ID: aimhi-analyzer-sandbox
+  METRICS_BASE_URL: ${{ vars.METRICS_BASE_URL }}
+
+jobs:
+  thresholds:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Fetch metrics
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${METRICS_BASE_URL:-}" ]]; then
+            echo "Missing metrics base URL. Set repository variable METRICS_BASE_URL."
+            exit 1
+          fi
+
+          METRICS_BASE_URL="${METRICS_BASE_URL%/}"
+          LATENCY="$(curl -fsS "${METRICS_BASE_URL}/api/latency")"
+          ERROR_RATE="$(curl -fsS "${METRICS_BASE_URL}/api/error-rate")"
+          TRAFFIC="$(curl -fsS "${METRICS_BASE_URL}/api/traffic-anomalies")"
+
+          echo "LATENCY=$LATENCY" >> "$GITHUB_ENV"
+          echo "ERROR_RATE=$ERROR_RATE" >> "$GITHUB_ENV"
+          echo "TRAFFIC=$TRAFFIC" >> "$GITHUB_ENV"
+
+      - name: Trigger rollback if thresholds exceeded
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$LATENCY" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            echo "Invalid LATENCY value: $LATENCY"
+            exit 1
+          fi
+
+          if ! [[ "$ERROR_RATE" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            echo "Invalid ERROR_RATE value: $ERROR_RATE"
+            exit 1
+          fi
+
+          if awk -v latency="$LATENCY" -v error_rate="$ERROR_RATE" -v traffic="$TRAFFIC" \
+            'BEGIN { exit !((latency + 0) > 500 || (error_rate + 0) > 0.05 || tolower(traffic) == "anomaly") }'
+          then
+            bash ./agents/rollback.sh
+          else
+            echo "Thresholds not exceeded; no rollback required."
+          fi
