@@ -61,15 +61,8 @@ jobs:
             exit 1
           fi
 
-          if python3 - "$LATENCY" "$ERROR_RATE" "$TRAFFIC" <<'PY'
-import sys
-
-latency = float(sys.argv[1])
-error_rate = float(sys.argv[2])
-traffic = sys.argv[3].strip().lower()
-
-sys.exit(0 if (latency > 500 or error_rate > 0.05 or traffic == "anomaly") else 1)
-PY
+          if awk -v latency="$LATENCY" -v error_rate="$ERROR_RATE" -v traffic="$TRAFFIC" \
+            'BEGIN { exit !((latency + 0) > 500 || (error_rate + 0) > 0.05 || tolower(traffic) == "anomaly") }'
           then
             bash ./agents/rollback.sh
           else
