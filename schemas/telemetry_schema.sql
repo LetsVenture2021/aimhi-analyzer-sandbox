@@ -1,0 +1,1 @@
+-- Placeholder telemetry schema for Analyzer Autonomy Suite
