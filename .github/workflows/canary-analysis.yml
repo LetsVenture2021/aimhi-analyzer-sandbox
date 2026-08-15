@@ -1,0 +1,38 @@
+name: Canary Analysis
+
+on:
+  workflow_dispatch:
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Authenticate
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: github-actions-deployer@aimhi-analyzer-sandbox.iam.gserviceaccount.com
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Compare canary vs baseline
+        run: |
+          CANARY=$(curl -s https://metrics.analyzer/api/canary)
+          BASE=$(curl -s https://metrics.analyzer/api/baseline)
+
+          if (( $(echo "$CANARY < $BASE" | bc -l) )); then
+            echo "Canary underperforming"
+            exit 1
+          fi
+
+      - name: Promote canary
+        run: |
+          gcloud run services update-traffic analyzer-api \
+            --region=us-central1 \
+            --to-revisions canary=100
