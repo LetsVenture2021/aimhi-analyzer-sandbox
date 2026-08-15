@@ -1,9 +1,13 @@
-name: Deploy Production Analyzer (Cloud Run, Blue-Green, Cloudflare, Multi-Region)
+name: Deploy Production Analyzer (Cloud Run, Blue-Green, Cloudflare)
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
+
+concurrency:
+  group: deploy-production-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   GCP_PROJECT_ID: aimhi-analyzer-sandbox
@@ -11,12 +15,11 @@ env:
   SERVICE_NAME: analyzer-api
   ARTIFACT_REPO: analyzer-images
   IMAGE_NAME: analyzer-api
-  PRIMARY_REGION: us-central1
-  SECONDARY_REGIONS: us-east1,us-west1
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: production
 
     permissions:
       id-token: write
@@ -25,6 +28,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Validate required deployment secrets
+        env:
+          GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+        run: |
+          set -euo pipefail
+          for required_secret in GCP_WIF_PROVIDER CLOUDFLARE_API_TOKEN CLOUDFLARE_ZONE_ID; do
+            if [[ -z "${!required_secret}" ]]; then
+              echo "Missing required secret: ${required_secret}" >&2
+              exit 1
+            fi
+          done
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -43,70 +60,140 @@ jobs:
 
       - name: Build and push image
         run: |
+          set -euo pipefail
           IMAGE_URI="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPO}/${IMAGE_NAME}:$GITHUB_SHA"
           docker build -t "$IMAGE_URI" .
           docker push "$IMAGE_URI"
           echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
 
-      - name: Determine blue/green revision names
+      - name: Deploy candidate revision
         run: |
-          BLUE="${SERVICE_NAME}-blue"
-          GREEN="${SERVICE_NAME}-green"
-          echo "BLUE=$BLUE" >> "$GITHUB_ENV"
-          echo "GREEN=$GREEN" >> "$GITHUB_ENV"
-
-      - name: Deploy GREEN revision (new)
-        run: |
-          gcloud run deploy "${{ env.GREEN }}" \
-            --image="${{ env.IMAGE_URI }}" \
-            --region="${{ env.GCP_REGION }}" \
-            --project="${{ env.GCP_PROJECT_ID }}" \
-            --platform=managed \
-            --allow-unauthenticated
-
-      - name: Route traffic (blue-green rollout)
-        run: |
-          # If BLUE exists, keep partial traffic; otherwise send all to GREEN
-          if gcloud run services describe "${{ env.BLUE }}" \
-            --region="${{ env.GCP_REGION }}" \
-            --project="${{ env.GCP_PROJECT_ID }}" >/dev/null 2>&1; then
-            echo "Blue exists; performing gradual rollout."
-            gcloud run services update-traffic "${{ env.SERVICE_NAME }}" \
-              --region="${{ env.GCP_REGION }}" \
-              --project="${{ env.GCP_PROJECT_ID }}" \
-              --to-revisions "${{ env.GREEN }}=50,${{ env.BLUE }}=50"
-          else
-            echo "No blue; routing 100% to green."
-            gcloud run services update-traffic "${{ env.SERVICE_NAME }}" \
-              --region="${{ env.GCP_REGION }}" \
-              --project="${{ env.GCP_PROJECT_ID }}" \
-              --to-revisions "${{ env.GREEN }}=100"
+          set -euo pipefail
+          STABLE_REVISION=""
+          if gcloud run services describe "$SERVICE_NAME" \
+            --region="$GCP_REGION" \
+            --project="$GCP_PROJECT_ID" >/dev/null 2>&1; then
+            TRAFFIC_JSON="$(gcloud run services describe "$SERVICE_NAME" \
+              --region="$GCP_REGION" \
+              --project="$GCP_PROJECT_ID" \
+              --format='json(status.traffic)')"
+            STABLE_REVISION="$(TRAFFIC_JSON="$TRAFFIC_JSON" python -c 'import json, os; traffic = json.loads(os.environ["TRAFFIC_JSON"] or "[]"); candidates = [entry for entry in traffic if entry.get("revisionName")]; stable = max(candidates, key=lambda entry: entry.get("percent", 0) or 0)["revisionName"] if candidates else ""; print(stable)')"
           fi
 
-      - name: Promote GREEN to full traffic (post-check)
-        if: success()
+          REVISION_SUFFIX="${GITHUB_RUN_NUMBER}-$(printf '%s' "$GITHUB_SHA" | cut -c1-7)"
+          gcloud run deploy "$SERVICE_NAME" \
+            --image="$IMAGE_URI" \
+            --region="$GCP_REGION" \
+            --project="$GCP_PROJECT_ID" \
+            --platform=managed \
+            --allow-unauthenticated \
+            --no-traffic \
+            --tag=green \
+            --revision-suffix="$REVISION_SUFFIX"
+
+          NEW_REVISION="$(gcloud run services describe "$SERVICE_NAME" \
+            --region="$GCP_REGION" \
+            --project="$GCP_PROJECT_ID" \
+            --format='value(status.latestCreatedRevisionName)')"
+          REVISION_URL="$(gcloud run revisions describe "$NEW_REVISION" \
+            --region="$GCP_REGION" \
+            --project="$GCP_PROJECT_ID" \
+            --format='value(status.address.url)')"
+
+          if [[ -z "$NEW_REVISION" || -z "$REVISION_URL" ]]; then
+            echo "Failed to resolve candidate revision details." >&2
+            exit 1
+          fi
+
+          echo "STABLE_REVISION=$STABLE_REVISION" >> "$GITHUB_ENV"
+          echo "NEW_REVISION=$NEW_REVISION" >> "$GITHUB_ENV"
+          echo "REVISION_URL=$REVISION_URL" >> "$GITHUB_ENV"
+
+      - name: Health check candidate revision
         run: |
-          gcloud run services update-traffic "${{ env.SERVICE_NAME }}" \
-            --region="${{ env.GCP_REGION }}" \
-            --project="${{ env.GCP_PROJECT_ID }}" \
-            --to-revisions "${{ env.GREEN }}=100"
+          set -euo pipefail
+          for attempt in {1..12}; do
+            status_code="$(curl -sS -o /tmp/revision-health-body.txt -w '%{http_code}' "${REVISION_URL}/" || true)"
+            if [[ "$status_code" =~ ^[23][0-9][0-9]$ ]]; then
+              echo "Candidate revision is healthy."
+              exit 0
+            fi
+            echo "Candidate health check attempt ${attempt}/12 failed with HTTP ${status_code}; retrying in 10s..."
+            sleep 10
+          done
+          echo "Candidate revision health check failed." >&2
+          cat /tmp/revision-health-body.txt >&2 || true
+          exit 1
+
+      - name: Shift canary traffic to candidate revision
+        if: env.STABLE_REVISION != ''
+        run: |
+          set -euo pipefail
+          gcloud run services update-traffic "$SERVICE_NAME" \
+            --region="$GCP_REGION" \
+            --project="$GCP_PROJECT_ID" \
+            --to-revisions "${NEW_REVISION}=10,${STABLE_REVISION}=90"
+
+      - name: Promote candidate revision to full traffic
+        run: |
+          set -euo pipefail
+          gcloud run services update-traffic "$SERVICE_NAME" \
+            --region="$GCP_REGION" \
+            --project="$GCP_PROJECT_ID" \
+            --to-revisions "${NEW_REVISION}=100"
+
+      - name: Validate production endpoint after promotion
+        run: |
+          set -euo pipefail
+          SERVICE_URL="$(gcloud run services describe "$SERVICE_NAME" \
+            --region="$GCP_REGION" \
+            --project="$GCP_PROJECT_ID" \
+            --format='value(status.url)')"
+          for attempt in {1..12}; do
+            status_code="$(curl -sS -o /tmp/service-health-body.txt -w '%{http_code}' "${SERVICE_URL}/" || true)"
+            if [[ "$status_code" =~ ^[23][0-9][0-9]$ ]]; then
+              echo "Production endpoint is healthy."
+              exit 0
+            fi
+            echo "Production health check attempt ${attempt}/12 failed with HTTP ${status_code}; retrying in 10s..."
+            sleep 10
+          done
+          echo "Production endpoint health check failed after promotion." >&2
+          cat /tmp/service-health-body.txt >&2 || true
+          exit 1
+
+      - name: Roll back traffic to previous stable revision
+        if: failure() && env.STABLE_REVISION != '' && env.NEW_REVISION != ''
+        run: |
+          set -euo pipefail
+          gcloud run services update-traffic "$SERVICE_NAME" \
+            --region="$GCP_REGION" \
+            --project="$GCP_PROJECT_ID" \
+            --to-revisions "${STABLE_REVISION}=100"
+          echo "Rollback completed to ${STABLE_REVISION}."
 
       - name: Purge Cloudflare cache
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
         run: |
-          CF_TOKEN="${{ secrets.CLOUDFLARE_API_TOKEN }}"
-          CF_ZONE="${{ secrets.CLOUDFLARE_ZONE_ID }}"
-          AUTH_HEADER_NAME="$(printf 'QXV0aG9yaXphdGlvbjogQmVhcmVy' | base64 -d)"
-          curl -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE/purge_cache" \
-            -H "${AUTH_HEADER_NAME} ${CF_TOKEN}" \
+          set -euo pipefail
+          CF_TOKEN="${CLOUDFLARE_API_TOKEN}"
+          CF_ZONE="${CLOUDFLARE_ZONE_ID}"
+          AUTH_SCHEME="Bearer"
+          RESPONSE="$(curl --fail-with-body --silent --show-error \
+            -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE}/purge_cache" \
+            -H "Authorization: ${AUTH_SCHEME} ${CF_TOKEN}" \
             -H "Content-Type: application/json" \
-            --data '{"purge_everything":true}'
+            --data '{"purge_everything":true}')"
+          RESPONSE="$RESPONSE" python -c 'import json, os, sys; response = json.loads(os.environ["RESPONSE"]); is_success = bool(response.get("success")); print("Cloudflare purge returned success=false.", file=sys.stderr) if not is_success else None; print(json.dumps(response), file=sys.stderr) if not is_success else None; sys.exit(0 if is_success else 1)'
 
-      - name: Trigger multi-region failover orchestration
+      - name: Run optional post-deploy optimization hook
         run: |
-          chmod +x agents/agent-multi-region-replicate.sh || true
-          chmod +x agents/agent-incident-response.sh || true
-          chmod +x agents/agent-swarm.sh || true
-
-          [ -x agents/agent-multi-region-replicate.sh ] && ./agents/agent-multi-region-replicate.sh || true
-          [ -x agents/agent-incident-response.sh ] && ./agents/agent-incident-response.sh || true
-          [ -x agents/agent-swarm.sh ] && ./agents/agent-swarm.sh "Validate deployment health" || true
+          set -euo pipefail
+          if [[ -f agents/user-experience-optimizer.sh ]]; then
+            chmod +x agents/user-experience-optimizer.sh
+            ./agents/user-experience-optimizer.sh
+          else
+            echo "Optional hook agents/user-experience-optimizer.sh not found; skipping."
+          fi
