@@ -6,6 +6,7 @@ on:
 jobs:
   funnel:
     runs-on: ubuntu-latest
+    permissions: {}
 
     steps:
       - name: Run funnel analysis
