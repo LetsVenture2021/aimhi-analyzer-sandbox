@@ -9,6 +9,7 @@ env:
   SERVICE_NAME: analyzer-api
   REGION: us-central1
   PROJECT_ID: aimhi-analyzer-sandbox
+  METRICS_BASE_URL: ${{ vars.METRICS_BASE_URL }}
 
 jobs:
   thresholds:
@@ -38,9 +39,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          LATENCY="$(curl -fsS https://metrics.analyzer/api/latency)"
-          ERROR_RATE="$(curl -fsS https://metrics.analyzer/api/error-rate)"
-          TRAFFIC="$(curl -fsS https://metrics.analyzer/api/traffic-anomalies)"
+          if [[ -z "${METRICS_BASE_URL:-}" ]]; then
+            echo "Missing metrics base URL. Set repository variable METRICS_BASE_URL."
+            exit 1
+          fi
+
+          METRICS_BASE_URL="${METRICS_BASE_URL%/}"
+          LATENCY="$(curl -fsS "${METRICS_BASE_URL}/api/latency")"
+          ERROR_RATE="$(curl -fsS "${METRICS_BASE_URL}/api/error-rate")"
+          TRAFFIC="$(curl -fsS "${METRICS_BASE_URL}/api/traffic-anomalies")"
 
           echo "LATENCY=$LATENCY" >> "$GITHUB_ENV"
           echo "ERROR_RATE=$ERROR_RATE" >> "$GITHUB_ENV"
