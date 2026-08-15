@@ -1,0 +1,14 @@
+name: Behavioral Segmentation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  segmentation:
+    runs-on: ubuntu-latest
+    permissions: {}
+
+    steps:
+      - name: Run segmentation agent
+        run: |
+          ./agents/user-experience-optimizer.sh "Segment users by behavior and propose personalized experiences."
