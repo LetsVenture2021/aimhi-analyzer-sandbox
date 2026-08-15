@@ -1,0 +1,14 @@
+name: Onboarding Friction Analysis
+
+on:
+  workflow_dispatch:
+
+jobs:
+  friction:
+    runs-on: ubuntu-latest
+    permissions: {}
+
+    steps:
+      - name: Run UX agent
+        run: |
+          ./agents/user-experience-optimizer.sh "Analyze onboarding friction and propose improvements."
