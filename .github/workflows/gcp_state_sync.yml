@@ -1,0 +1,56 @@
+name: GCP State Sync
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+  repository_dispatch:
+    types:
+      - gcp-cloud-build-event
+      - gcp-cloud-run-event
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: gcp-state-sync-main
+  cancel-in-progress: false
+
+jobs:
+  sync-gcp-state:
+    runs-on: ubuntu-latest
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ github.event.client_payload.region || vars.GCP_REGION || 'us-central1' }}
+      BIGQUERY_DATASET: ${{ vars.BIGQUERY_DATASET || 'telemetry' }}
+      BIGQUERY_TABLE: ${{ vars.BIGQUERY_TABLE || 'telemetry' }}
+      CLOUD_RUN_SERVICE: ${{ github.event.client_payload.cloud_run_service || vars.CLOUD_RUN_SERVICE || 'autonomy-service' }}
+      LOGGING_SINK: ${{ vars.LOGGING_SINK || 'autonomy-sink' }}
+      PIPELINE_SOURCE_BUCKET: ${{ vars.PIPELINE_SOURCE_BUCKET }}
+      DASHBOARD_SOURCE_BUCKET: ${{ vars.DASHBOARD_SOURCE_BUCKET }}
+      LOOKER_SOURCE_BUCKET: ${{ vars.LOOKER_SOURCE_BUCKET }}
+      SCRIPT_SOURCE_BUCKET: ${{ vars.SCRIPT_SOURCE_BUCKET }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Authenticate to Google Cloud via Workload Identity Federation
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT_EMAIL }}
+          token_format: access_token
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Run GCP state sync
+        run: chmod +x scripts/gcp-sync/*.sh && ./scripts/gcp-sync/sync.sh
