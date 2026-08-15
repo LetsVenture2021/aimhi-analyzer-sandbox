@@ -1,0 +1,20 @@
+{
+  "title": "Autonomy Overview",
+  "uid": "autonomy-overview",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Autonomy Events",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": {"type": "bigquery", "uid": "autonomy-bq"},
+          "rawSql": "SELECT TIMESTAMP_TRUNC(event_ts, MINUTE) AS minute_bucket, COUNT(*) AS event_count FROM autonomy_telemetry.events GROUP BY minute_bucket ORDER BY minute_bucket"
+        }
+      ]
+    }
+  ]
+}
