@@ -119,7 +119,7 @@ export class AgentGcpClient {
 
   public insertTelemetry(table: string, payload: Record<string, unknown>): string {
     const json = stringify(payload);
-    const escaped = json.replace(/"/g, '\\"');
+    const escaped = json.replace(/\\/g, "\\\\").replace(/'/g, "''");
     const sql = `INSERT INTO \`${table}\` (payload) VALUES ('${escaped}')`;
     const cmd = `bq query --use_legacy_sql=false --format=none ${shellEscape(sql)}`;
     return this.runCommand(cmd);
