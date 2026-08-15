@@ -19,7 +19,7 @@ function yamlScalar(value: unknown): string {
   if (typeof value === "number" || typeof value === "boolean") {
     return String(value);
   }
-  const text = String(value).replace(/"/g, '\\"');
+  const text = String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   return `"${text}"`;
 }
 

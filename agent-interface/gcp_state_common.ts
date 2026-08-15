@@ -89,7 +89,8 @@ export async function assertServiceAccountExecution(): Promise<string> {
   const command = "gcloud auth list --filter=status:ACTIVE --format=value(account)";
   const result = await runCommand(command);
   const account = result.stdout.trim();
-  if (!account || !account.endsWith("gserviceaccount.com")) {
+  const isServiceAccount = /^[^@\s]+@[^@\s]+\.gserviceaccount\.com$/.test(account);
+  if (!account || !isServiceAccount) {
     throw new Error(`Expected active service account credentials but found: ${account || "none"}`);
   }
   return account;
