@@ -9,6 +9,8 @@ on:
 jobs:
   validate-autonomy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
     - uses: actions/checkout@v4
     - run: chmod +x infra/autonomy/scripts/*.sh infra/autonomy/pipelines/*.sh

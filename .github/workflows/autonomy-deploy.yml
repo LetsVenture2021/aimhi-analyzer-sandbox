@@ -10,6 +10,9 @@ on:
 jobs:
   apply-iam:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
     - uses: actions/checkout@v4
     - uses: google-github-actions/auth@v2
@@ -25,6 +28,9 @@ jobs:
   apply-data-and-sinks:
     runs-on: ubuntu-latest
     needs: [apply-iam]
+    permissions:
+      contents: read
+      id-token: write
     steps:
     - uses: actions/checkout@v4
     - uses: google-github-actions/auth@v2
@@ -41,6 +47,9 @@ jobs:
   deploy-autonomy-components:
     runs-on: ubuntu-latest
     needs: [apply-data-and-sinks]
+    permissions:
+      contents: read
+      id-token: write
     steps:
     - uses: actions/checkout@v4
     - uses: google-github-actions/auth@v2
