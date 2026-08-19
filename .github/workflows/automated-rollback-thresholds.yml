@@ -1,8 +1,6 @@
 name: Automated Rollback Thresholds
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 env:
