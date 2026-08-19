@@ -1,51 +1,33 @@
-import { outputPath, readJsonCommand, safeName, writeJsonFile } from "./gcp_utils";
+import path from "node:path";
+import { IngestContext, runJsonCommand, shellEscape, writeJson } from "./gcp_state_common";
 
-export interface LoggingFetchConfig {
-  projectId: string;
-  outputRoot: string;
-}
+type Sink = { name?: string; destination?: string; filter?: string; [key: string]: unknown };
 
-export function fetchLoggingState(config: LoggingFetchConfig): unknown {
-  const loggingRoot = outputPath(config.outputRoot, "logging");
-  const sinks = readJsonCommand(`gcloud logging sinks list --project=${config.projectId} --format=json`);
-  writeJsonFile(outputPath(loggingRoot, "sinks.json"), sinks);
+export async function fetchLoggingState(context: IngestContext): Promise<Record<string, unknown>> {
+  const outputDir = path.join(context.outputRoot, "logging");
+  const projectEscaped = shellEscape(context.projectId);
+  const sinksRaw = await runJsonCommand(`gcloud logging sinks list --project=${projectEscaped} --format=json`, true);
+  const sinks = Array.isArray(sinksRaw) ? (sinksRaw as Sink[]) : [];
 
-  const sinkNames = extractSinkNames(sinks.payload);
-  const sinkDetails = sinkNames.map((sinkName) => {
-    const sink = readJsonCommand(`gcloud logging sinks describe ${sinkName} --project=${config.projectId} --format=json`);
-    const structured = {
-      sinkName,
-      fetchedAt: new Date().toISOString(),
-      sinkDefinition: sink,
-      sinkFilter: extractSinkField(sink.payload, "filter"),
-      sinkDestination: extractSinkField(sink.payload, "destination")
-    };
-    writeJsonFile(outputPath(loggingRoot, `sink-${safeName(sinkName)}.json`), structured);
-    return structured;
+  const sinkDefinitions = sinks.map((sink) => ({
+    name: sink.name ?? "",
+    destination: sink.destination ?? "",
+    filter: sink.filter ?? "",
+    raw: sink,
+  }));
+  const sinkFilters = sinks.map((sink) => ({ name: sink.name ?? "", filter: sink.filter ?? "" }));
+  const sinkDestinations = sinks.map((sink) => ({ name: sink.name ?? "", destination: sink.destination ?? "" }));
+
+  await writeJson(path.join(outputDir, "sink-definitions.json"), { items: sinkDefinitions });
+  await writeJson(path.join(outputDir, "sink-filters.json"), { items: sinkFilters });
+  await writeJson(path.join(outputDir, "sink-destinations.json"), { items: sinkDestinations });
+  await writeJson(path.join(outputDir, "index.json"), {
+    resource: "logging",
+    generatedAt: new Date().toISOString(),
+    count: sinks.length,
   });
 
-  const summary = {
-    fetchedAt: new Date().toISOString(),
-    projectId: config.projectId,
-    sinkDetails
+  return {
+    count: sinks.length,
   };
-  writeJsonFile(outputPath(loggingRoot, "logging-index.json"), summary);
-  return summary;
-}
-
-function extractSinkNames(payload: unknown): string[] {
-  if (!Array.isArray(payload)) {
-    return [];
-  }
-  return payload
-    .map((item) => (item && typeof item === "object" ? (item as Record<string, unknown>).name : undefined))
-    .filter((name): name is string => typeof name === "string" && name.length > 0);
-}
-
-function extractSinkField(payload: unknown, key: string): string | null {
-  if (!payload || typeof payload !== "object") {
-    return null;
-  }
-  const value = (payload as Record<string, unknown>)[key];
-  return typeof value === "string" ? value : null;
 }

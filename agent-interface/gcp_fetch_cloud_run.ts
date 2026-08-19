@@ -1,102 +1,54 @@
-import { outputPath, readJsonCommand, safeName, writeJsonFile } from "./gcp_utils";
+import path from "node:path";
+import { IngestContext, runJsonCommand, shellEscape, writeJson } from "./gcp_state_common";
 
-export interface CloudRunFetchConfig {
-  projectId: string;
-  regions: string[];
-  outputRoot: string;
-}
+type CloudRunService = {
+  metadata?: { name?: string };
+  spec?: { template?: { spec?: { containers?: Array<{ env?: Array<{ name?: string; value?: string }> }> } }; traffic?: unknown };
+  status?: { traffic?: unknown };
+};
 
-export function fetchCloudRunState(config: CloudRunFetchConfig): unknown {
-  const cloudRunRoot = outputPath(config.outputRoot, "cloud-run");
-  const regionRecords = config.regions.map((region) => {
-    const listResult = readJsonCommand(
-      `gcloud run services list --project=${config.projectId} --region=${region} --format=json`
-    );
-    const services = extractServiceNames(listResult.payload);
+export async function fetchCloudRunState(context: IngestContext): Promise<Record<string, unknown>> {
+  const outputDir = path.join(context.outputRoot, "cloud-run");
+  const projectEscaped = shellEscape(context.projectId);
+  const regionEscaped = shellEscape(context.region);
 
-    const serviceRecords = services.map((serviceName) => {
-      const service = readJsonCommand(
-        `gcloud run services describe ${serviceName} --project=${config.projectId} --region=${region} --format=json`
-      );
-      const revisions = readJsonCommand(
-        `gcloud run revisions list --project=${config.projectId} --region=${region} --service=${serviceName} --format=json`
-      );
-      const structured = {
-        serviceName,
-        region,
-        fetchedAt: new Date().toISOString(),
-        serviceConfiguration: service,
-        environmentVariables: extractEnv(service.payload),
-        trafficRouting: extractTraffic(service.payload),
-        revisions
-      };
-      writeJsonFile(outputPath(cloudRunRoot, `service-${safeName(region)}-${safeName(serviceName)}.json`), structured);
-      return structured;
-    });
+  const servicesRaw = await runJsonCommand(`gcloud run services list --platform=managed --project=${projectEscaped} --region=${regionEscaped} --format=json`, true);
+  const services = Array.isArray(servicesRaw) ? (servicesRaw as CloudRunService[]) : [];
 
-    return { region, listResult, serviceRecords };
-  });
+  const serviceConfigurations = [];
+  const environmentVariables = [];
+  const trafficRouting = [];
+  const revisions = [];
 
-  const summary = {
-    fetchedAt: new Date().toISOString(),
-    projectId: config.projectId,
-    regions: regionRecords
-  };
-  writeJsonFile(outputPath(cloudRunRoot, "cloud-run-index.json"), summary);
-  return summary;
-}
-
-function extractServiceNames(payload: unknown): string[] {
-  if (!Array.isArray(payload)) {
-    return [];
-  }
-  return payload
-    .map((item) => (item && typeof item === "object" ? (item as Record<string, unknown>).metadata : undefined))
-    .map((metadata) => (metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>).name : undefined))
-    .filter((name): name is string => typeof name === "string" && name.length > 0);
-}
-
-function extractEnv(payload: unknown): unknown[] {
-  if (!payload || typeof payload !== "object") {
-    return [];
-  }
-  const spec = (payload as Record<string, unknown>).spec;
-  if (!spec || typeof spec !== "object") {
-    return [];
-  }
-  const template = (spec as Record<string, unknown>).template;
-  if (!template || typeof template !== "object") {
-    return [];
-  }
-  const templateSpec = (template as Record<string, unknown>).spec;
-  if (!templateSpec || typeof templateSpec !== "object") {
-    return [];
-  }
-  const containers = (templateSpec as Record<string, unknown>).containers;
-  if (!Array.isArray(containers)) {
-    return [];
-  }
-  const envVars: unknown[] = [];
-  for (const container of containers) {
-    if (!container || typeof container !== "object") {
+  for (const service of services) {
+    const serviceName = service.metadata?.name;
+    if (!serviceName) {
       continue;
     }
-    const env = (container as Record<string, unknown>).env;
-    if (Array.isArray(env)) {
-      envVars.push(...env);
-    }
-  }
-  return envVars;
-}
+    const describeRaw = await runJsonCommand(`gcloud run services describe ${shellEscape(serviceName)} --platform=managed --project=${projectEscaped} --region=${regionEscaped} --format=json`, true);
+    serviceConfigurations.push({ serviceName, config: describeRaw });
 
-function extractTraffic(payload: unknown): unknown[] {
-  if (!payload || typeof payload !== "object") {
-    return [];
+    const serviceObject = typeof describeRaw === "object" && describeRaw !== null ? (describeRaw as CloudRunService) : {};
+    const containers = serviceObject.spec?.template?.spec?.containers ?? [];
+    const env = containers.flatMap((container) => container.env ?? []);
+    environmentVariables.push({ serviceName, environmentVariables: env });
+    trafficRouting.push({ serviceName, traffic: serviceObject.status?.traffic ?? serviceObject.spec?.traffic ?? [] });
+
+    const revisionsRaw = await runJsonCommand(`gcloud run revisions list --service=${shellEscape(serviceName)} --platform=managed --project=${projectEscaped} --region=${regionEscaped} --format=json`, true);
+    revisions.push({ serviceName, revisions: revisionsRaw });
   }
-  const spec = (payload as Record<string, unknown>).spec;
-  if (!spec || typeof spec !== "object") {
-    return [];
-  }
-  const traffic = (spec as Record<string, unknown>).traffic;
-  return Array.isArray(traffic) ? traffic : [];
+
+  await writeJson(path.join(outputDir, "service-configuration.json"), { items: serviceConfigurations });
+  await writeJson(path.join(outputDir, "environment-variables.json"), { items: environmentVariables });
+  await writeJson(path.join(outputDir, "traffic-routing.json"), { items: trafficRouting });
+  await writeJson(path.join(outputDir, "revisions.json"), { items: revisions });
+  await writeJson(path.join(outputDir, "index.json"), {
+    resource: "cloud-run",
+    generatedAt: new Date().toISOString(),
+    count: services.length,
+  });
+
+  return {
+    count: services.length,
+  };
 }

@@ -1,102 +1,76 @@
-import { outputPath, parseCsvEnv, readJsonCommand, safeName, writeJsonFile } from "./gcp_utils";
+import path from "node:path";
+import { IngestContext, normalizeName, runJsonCommand, shellEscape, writeJson } from "./gcp_state_common";
 
-export interface IamFetchConfig {
-  projectId: string;
-  serviceAccounts: string[];
-  bigQueryDatasets: string[];
-  loggingSinks: string[];
-  outputRoot: string;
-}
+type DatasetRef = { id?: string; datasetReference?: { datasetId?: string } };
+type ServiceAccountRef = { email?: string };
+type SinkRef = { name?: string };
 
-export function defaultIamConfigFromEnv(outputRoot: string): IamFetchConfig {
+export async function fetchIamState(context: IngestContext): Promise<Record<string, unknown>> {
+  const iamDir = path.join(context.outputRoot, "iam");
+  const projectEscaped = shellEscape(context.projectId);
+
+  const projectPolicy = await runJsonCommand(`gcloud projects get-iam-policy ${projectEscaped} --format=json`);
+
+  const serviceAccountsRaw = await runJsonCommand(`gcloud iam service-accounts list --project=${projectEscaped} --format=json`);
+  const serviceAccounts = Array.isArray(serviceAccountsRaw) ? (serviceAccountsRaw as ServiceAccountRef[]) : [];
+  const serviceAccountPolicies = [];
+  for (const account of serviceAccounts) {
+    if (!account.email) {
+      continue;
+    }
+    const policy = await runJsonCommand(`gcloud iam service-accounts get-iam-policy ${shellEscape(account.email)} --project=${projectEscaped} --format=json`, true);
+    serviceAccountPolicies.push({ serviceAccount: account.email, policy });
+  }
+
+  const datasetsRaw = await runJsonCommand(`bq --project_id=${projectEscaped} ls --format=prettyjson`, true);
+  const datasets = Array.isArray(datasetsRaw) ? (datasetsRaw as DatasetRef[]) : [];
+  const datasetPolicies = [];
+  for (const dataset of datasets) {
+    const datasetId = dataset.datasetReference?.datasetId ?? dataset.id?.split(":")[1];
+    if (!datasetId) {
+      continue;
+    }
+    const fqDataset = `${context.projectId}:${datasetId}`;
+    const policy = await runJsonCommand(`bq --project_id=${projectEscaped} get-iam-policy --format=prettyjson ${shellEscape(fqDataset)}`, true);
+    datasetPolicies.push({ datasetId, policy });
+  }
+
+  const sinksRaw = await runJsonCommand(`gcloud logging sinks list --project=${projectEscaped} --format=json`, true);
+  const sinks = Array.isArray(sinksRaw) ? (sinksRaw as SinkRef[]) : [];
+  const sinkPolicies = [];
+  for (const sink of sinks) {
+    if (!sink.name) {
+      continue;
+    }
+    const policy = await runJsonCommand(`gcloud logging sinks get-iam-policy ${shellEscape(sink.name)} --project=${projectEscaped} --format=json`, true);
+    sinkPolicies.push({ sinkName: sink.name, policy });
+  }
+
+  const projectFile = path.join(iamDir, "project-iam.json");
+  const serviceAccountFile = path.join(iamDir, "service-account-iam.json");
+  const datasetFile = path.join(iamDir, "bigquery-dataset-iam.json");
+  const sinkFile = path.join(iamDir, "logging-sink-iam.json");
+  const indexFile = path.join(iamDir, "index.json");
+
+  await writeJson(projectFile, projectPolicy);
+  await writeJson(serviceAccountFile, { items: serviceAccountPolicies });
+  await writeJson(datasetFile, { items: datasetPolicies });
+  await writeJson(sinkFile, { items: sinkPolicies });
+
+  const index = {
+    resource: "iam",
+    generatedAt: new Date().toISOString(),
+    files: [projectFile, serviceAccountFile, datasetFile, sinkFile].map((filePath) => path.basename(filePath)),
+    counts: {
+      serviceAccounts: serviceAccountPolicies.length,
+      datasets: datasetPolicies.length,
+      sinks: sinkPolicies.length,
+    },
+  };
+  await writeJson(indexFile, index);
+
   return {
-    projectId: process.env.GCP_PROJECT_ID || "",
-    serviceAccounts: parseCsvEnv(process.env.GCP_SERVICE_ACCOUNTS),
-    bigQueryDatasets: parseCsvEnv(process.env.GCP_BQ_DATASETS),
-    loggingSinks: parseCsvEnv(process.env.GCP_LOGGING_SINKS),
-    outputRoot
+    indexFile: path.join("iam", normalizeName(path.basename(indexFile))),
+    counts: index.counts,
   };
-}
-
-export function fetchIamState(config: IamFetchConfig): unknown {
-  const iamRoot = outputPath(config.outputRoot, "iam");
-  const projectIam = readJsonCommand(`gcloud projects get-iam-policy ${config.projectId} --format=json`);
-  writeJsonFile(outputPath(iamRoot, "project-iam.json"), projectIam);
-
-  const serviceAccounts =
-    config.serviceAccounts.length > 0
-      ? config.serviceAccounts
-      : extractServiceAccounts(
-          readJsonCommand(`gcloud iam service-accounts list --project=${config.projectId} --format=json`).payload
-        );
-
-  const serviceAccountPolicies = serviceAccounts.map((serviceAccount) => {
-    const result = readJsonCommand(
-      `gcloud iam service-accounts get-iam-policy ${serviceAccount} --project=${config.projectId} --format=json`
-    );
-    writeJsonFile(outputPath(iamRoot, `service-account-${safeName(serviceAccount)}.json`), result);
-    return { serviceAccount, result };
-  });
-
-  const datasetPolicies = config.bigQueryDatasets.map((datasetId) => {
-    const result = readJsonCommand(
-      `gcloud alpha bq datasets get-iam-policy ${datasetId} --project=${config.projectId} --format=json`
-    );
-    writeJsonFile(outputPath(iamRoot, `bigquery-dataset-${safeName(datasetId)}.json`), result);
-    return { datasetId, result };
-  });
-
-  const sinkNames =
-    config.loggingSinks.length > 0
-      ? config.loggingSinks
-      : extractLoggingSinks(readJsonCommand(`gcloud logging sinks list --project=${config.projectId} --format=json`).payload);
-
-  const sinkPolicies = sinkNames.map((sinkName) => {
-    const sink = readJsonCommand(`gcloud logging sinks describe ${sinkName} --project=${config.projectId} --format=json`);
-    const sinkRecord = {
-      sinkName,
-      fetchedAt: new Date().toISOString(),
-      writerIdentity: extractWriterIdentity(sink.payload),
-      sinkDetails: sink
-    };
-    writeJsonFile(outputPath(iamRoot, `logging-sink-${safeName(sinkName)}.json`), sinkRecord);
-    return sinkRecord;
-  });
-
-  const summary = {
-    fetchedAt: new Date().toISOString(),
-    projectId: config.projectId,
-    projectIam,
-    serviceAccountPolicies,
-    datasetPolicies,
-    sinkPolicies
-  };
-  writeJsonFile(outputPath(iamRoot, "iam-index.json"), summary);
-  return summary;
-}
-
-function extractServiceAccounts(payload: unknown): string[] {
-  if (!Array.isArray(payload)) {
-    return [];
-  }
-  return payload
-    .map((entry) => (entry && typeof entry === "object" ? (entry as Record<string, unknown>).email : undefined))
-    .filter((email): email is string => typeof email === "string" && email.length > 0);
-}
-
-function extractLoggingSinks(payload: unknown): string[] {
-  if (!Array.isArray(payload)) {
-    return [];
-  }
-  return payload
-    .map((entry) => (entry && typeof entry === "object" ? (entry as Record<string, unknown>).name : undefined))
-    .filter((name): name is string => typeof name === "string" && name.length > 0);
-}
-
-function extractWriterIdentity(payload: unknown): string | null {
-  if (!payload || typeof payload !== "object") {
-    return null;
-  }
-  const value = (payload as Record<string, unknown>).writerIdentity;
-  return typeof value === "string" ? value : null;
 }

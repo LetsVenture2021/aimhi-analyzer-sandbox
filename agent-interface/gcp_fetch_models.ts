@@ -1,85 +1,79 @@
-import {
-  copyFilesWithExtensions,
-  outputPath,
-  readJsonCommand,
-  safeName,
-  writeJsonFile,
-  writeTextFile
-} from "./gcp_utils";
+import path from "node:path";
+import { IngestContext, normalizeName, runJsonCommand, shellEscape, writeJson, writeText } from "./gcp_state_common";
 
-export interface ModelsFetchConfig {
-  projectId: string;
-  location: string;
-  outputRoot: string;
-  emitterScriptsPath?: string;
-  emitterConfigsPath?: string;
+type LookerInstance = { name?: string; platformEdition?: string; region?: string; consumerNetwork?: string; lookerUri?: string };
+type VertexModel = { name?: string; displayName?: string; labels?: Record<string, string>; versionId?: string };
+
+function lkmlFromLooker(instance: LookerInstance): string {
+  const name = normalizeName(instance.name ?? "looker_instance");
+  const lines = [
+    `view: ${name} {`,
+    `  sql_table_name: "looker_instance_metadata" ;;`,
+    `  dimension: instance_name { type: string sql: "${instance.name ?? ""}" ;; }`,
+    `  dimension: looker_uri { type: string sql: "${instance.lookerUri ?? ""}" ;; }`,
+    `  dimension: region { type: string sql: "${instance.region ?? ""}" ;; }`,
+    `  dimension: edition { type: string sql: "${instance.platformEdition ?? ""}" ;; }`,
+    "}",
+  ];
+  return `${lines.join("\n")}\n`;
 }
 
-export function fetchModelsState(config: ModelsFetchConfig): unknown {
-  const modelRoot = outputPath(config.outputRoot, "models");
-  const scriptRoot = outputPath(config.outputRoot, "scripts");
-  const modelList = readJsonCommand(
-    `gcloud ai models list --project=${config.projectId} --region=${config.location} --format=json`
-  );
-  writeJsonFile(outputPath(modelRoot, "models.json"), modelList);
+function emitterScript(projectId: string, region: string): string {
+  return `#!/usr/bin/env bash\nset -euo pipefail\nPROJECT_ID="${projectId}"\nREGION="${region}"\ngcloud ai models list --project="$PROJECT_ID" --region="$REGION" --format=json\n`;
+}
 
-  const modelItems = Array.isArray(modelList.payload) ? modelList.payload : [];
-  const modelRecords = modelItems.map((item) => {
-    const modelName = readField(item, "name");
-    const displayName = readField(item, "displayName");
-    const modelId = modelName || displayName || "model";
-    const details = modelName
-      ? readJsonCommand(`gcloud ai models describe ${modelName} --project=${config.projectId} --region=${config.location} --format=json`)
-      : { command: "", ok: false, fetchedAt: new Date().toISOString(), payload: { error: "missing model name" } };
-    writeJsonFile(outputPath(modelRoot, `${safeName(modelId)}.json`), details);
-    const lkml = toLkmlView(modelId, config.projectId);
-    writeTextFile(outputPath(modelRoot, `${safeName(modelId)}.lkml`), lkml);
-    writeTextFile(outputPath(scriptRoot, `${safeName(modelId)}-emitter.sh`), emitterScriptForModel(modelId, config.projectId));
-    return { modelId, details };
-  });
-
-  const copiedScripts = copyFilesWithExtensions(config.emitterScriptsPath, scriptRoot, [".sh"]);
-  const copiedConfigs = copyFilesWithExtensions(config.emitterConfigsPath, modelRoot, [".json", ".yaml", ".yml", ".cfg", ".conf"]);
-
-  writeTextFile(outputPath(scriptRoot, "emit_telemetry.sh"), globalEmitterScript(config.projectId));
-  writeJsonFile(outputPath(modelRoot, "emitter-configs.json"), {
-    fetchedAt: new Date().toISOString(),
-    projectId: config.projectId,
-    copiedScripts,
-    copiedConfigs
-  });
-
-  const summary = {
-    fetchedAt: new Date().toISOString(),
-    projectId: config.projectId,
-    location: config.location,
-    models: modelRecords,
-    copiedScripts,
-    copiedConfigs
+function emitterConfig(projectId: string, region: string): Record<string, unknown> {
+  return {
+    emitter_name: "vertex-model-state-emitter",
+    project_id: projectId,
+    region,
+    resource: "vertex-ai-models",
+    format: "json",
+    command: "gcloud ai models list --project=$PROJECT_ID --region=$REGION --format=json",
   };
-  writeJsonFile(outputPath(modelRoot, "model-index.json"), summary);
-  return summary;
 }
 
-function readField(item: unknown, key: string): string {
-  if (!item || typeof item !== "object") {
-    return "";
+export async function fetchModelState(context: IngestContext): Promise<Record<string, unknown>> {
+  const modelDir = path.join(context.outputRoot, "models");
+  const scriptDir = path.join(context.outputRoot, "scripts");
+  const projectEscaped = shellEscape(context.projectId);
+  const regionEscaped = shellEscape(context.region);
+
+  const lookerInstancesRaw = await runJsonCommand(`gcloud looker instances list --project=${projectEscaped} --region=${regionEscaped} --format=json`, true);
+  const lookerInstances = Array.isArray(lookerInstancesRaw) ? (lookerInstancesRaw as LookerInstance[]) : [];
+
+  const vertexModelsRaw = await runJsonCommand(`gcloud ai models list --project=${projectEscaped} --region=${regionEscaped} --format=json`, true);
+  const vertexModels = Array.isArray(vertexModelsRaw) ? (vertexModelsRaw as VertexModel[]) : [];
+
+  const lkmlFiles: string[] = [];
+  for (const instance of lookerInstances) {
+    const name = normalizeName(instance.name ?? `looker-${lkmlFiles.length + 1}`);
+    const fileName = `${name}.lkml`;
+    await writeText(path.join(modelDir, fileName), lkmlFromLooker(instance));
+    lkmlFiles.push(fileName);
   }
-  const value = (item as Record<string, unknown>)[key];
-  return typeof value === "string" ? value : "";
-}
 
-function toLkmlView(modelId: string, projectId: string): string {
-  const viewName = safeName(modelId).replace(/[-.]/g, "_");
-  const tableRef = `${projectId}.autonomy_telemetry.${safeName(modelId)}`;
-  return `view: ${viewName} {\n  sql_table_name: "${tableRef}" ;;\n  dimension: model_id { type: string sql: "${modelId}" ;; }\n}\n`;
-}
+  const scriptPath = path.join(scriptDir, "emit-model-telemetry.sh");
+  const configPath = path.join(scriptDir, "emit-model-telemetry-config.json");
+  await writeText(scriptPath, emitterScript(context.projectId, context.region));
+  await writeJson(configPath, emitterConfig(context.projectId, context.region));
 
-function emitterScriptForModel(modelId: string, projectId: string): string {
-  const safeModel = safeName(modelId);
-  return `#!/usr/bin/env bash\nset -euo pipefail\ngcloud logging write analyzer-autonomy "model=${safeModel} status=healthy source=telemetry-emitter" --project=${projectId} --severity=INFO\n`;
-}
+  await writeJson(path.join(modelDir, "vertex-model-metadata.json"), { items: vertexModels });
+  await writeJson(path.join(modelDir, "looker-instance-metadata.json"), { items: lookerInstances });
+  await writeJson(path.join(modelDir, "index.json"), {
+    resource: "models",
+    generatedAt: new Date().toISOString(),
+    lkmlFiles,
+    modelCount: vertexModels.length,
+    lookerInstanceCount: lookerInstances.length,
+    telemetryEmitterScript: path.basename(scriptPath),
+    telemetryEmitterConfig: path.basename(configPath),
+  });
 
-function globalEmitterScript(projectId: string): string {
-  return `#!/usr/bin/env bash\nset -euo pipefail\nTIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"\ngcloud logging write analyzer-autonomy "event=heartbeat timestamp=${TIMESTAMP} source=autonomy-emitter" --project=${projectId} --severity=INFO\n`;
+  return {
+    modelCount: vertexModels.length,
+    lookerInstanceCount: lookerInstances.length,
+    lkmlFiles,
+    script: path.basename(scriptPath),
+  };
 }

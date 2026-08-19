@@ -1,106 +1,92 @@
-import { outputPath, readJsonCommand, safeName, writeTextFile } from "./gcp_utils";
+import path from "node:path";
+import { IngestContext, normalizeName, runJsonCommand, shellEscape, writeJson, writeText } from "./gcp_state_common";
 
-export interface PipelineFetchConfig {
-  projectId: string;
-  location: string;
-  outputRoot: string;
+type BuildTrigger = {
+  id?: string;
+  name?: string;
+  description?: string;
+  filename?: string;
+  serviceAccount?: string;
+  createTime?: string;
+  tags?: string[];
+  substitutions?: Record<string, string>;
+};
+
+function yamlScalar(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "null";
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  const text = String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `"${text}"`;
 }
 
-export function fetchPipelinesState(config: PipelineFetchConfig): unknown {
-  const pipelineRoot = outputPath(config.outputRoot, "pipelines");
-  const pipelineJobs = readJsonCommand(
-    `gcloud ai pipeline-jobs list --project=${config.projectId} --region=${config.location} --format=json`
-  );
-  const schedulerJobs = readJsonCommand(
-    `gcloud scheduler jobs list --project=${config.projectId} --location=${config.location} --format=json`
-  );
-
-  const pipelineYaml = renderYaml({
-    fetchedAt: new Date().toISOString(),
-    projectId: config.projectId,
-    location: config.location,
-    pipelineJobs: pipelineJobs.payload
-  });
-  writeTextFile(outputPath(pipelineRoot, "pipeline-jobs.yaml"), pipelineYaml);
-
-  const scheduleYaml = renderYaml({
-    fetchedAt: new Date().toISOString(),
-    projectId: config.projectId,
-    location: config.location,
-    schedules: schedulerJobs.payload
-  });
-  writeTextFile(outputPath(pipelineRoot, "pipeline-schedules.yaml"), scheduleYaml);
-
-  const jobs = Array.isArray(pipelineJobs.payload) ? pipelineJobs.payload : [];
-  for (const job of jobs) {
-    if (!job || typeof job !== "object") {
-      continue;
+function pipelineYamlFromTrigger(trigger: BuildTrigger): string {
+  const lines: string[] = [];
+  lines.push(`id: ${yamlScalar(trigger.id ?? "")}`);
+  lines.push(`name: ${yamlScalar(trigger.name ?? "")}`);
+  lines.push(`description: ${yamlScalar(trigger.description ?? "")}`);
+  lines.push(`definition_file: ${yamlScalar(trigger.filename ?? "")}`);
+  lines.push(`service_account: ${yamlScalar(trigger.serviceAccount ?? "")}`);
+  lines.push(`created_at: ${yamlScalar(trigger.createTime ?? "")}`);
+  const tags = trigger.tags ?? [];
+  if (tags.length === 0) {
+    lines.push("tags: []");
+  } else {
+    lines.push("tags:");
+    for (const tag of tags) {
+      lines.push(`  - ${yamlScalar(tag)}`);
     }
-    const nameValue = (job as Record<string, unknown>).name;
-    if (typeof nameValue !== "string" || nameValue.length === 0) {
-      continue;
-    }
-    const perJobYaml = renderYaml({
-      fetchedAt: new Date().toISOString(),
-      metadata: job
-    });
-    writeTextFile(outputPath(pipelineRoot, `${safeName(nameValue)}.yaml`), perJobYaml);
   }
+  const substitutions = trigger.substitutions ?? {};
+  const substitutionEntries = Object.entries(substitutions);
+  if (substitutionEntries.length === 0) {
+    lines.push("substitutions: {}");
+  } else {
+    lines.push("substitutions:");
+    for (const [key, value] of substitutionEntries) {
+      lines.push(`  ${key}: ${yamlScalar(value)}`);
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+export async function fetchPipelineState(context: IngestContext): Promise<Record<string, unknown>> {
+  const outputDir = path.join(context.outputRoot, "pipelines");
+  const projectEscaped = shellEscape(context.projectId);
+  const locationEscaped = shellEscape(context.location);
+
+  const triggersRaw = await runJsonCommand(`gcloud builds triggers list --project=${projectEscaped} --format=json`, true);
+  const schedulerRaw = await runJsonCommand(`gcloud scheduler jobs list --project=${projectEscaped} --location=${locationEscaped} --format=json`, true);
+  const triggers = Array.isArray(triggersRaw) ? (triggersRaw as BuildTrigger[]) : [];
+  const schedulerJobs = Array.isArray(schedulerRaw) ? schedulerRaw : [];
+
+  const yamlFiles: string[] = [];
+  for (const trigger of triggers) {
+    const baseName = normalizeName(trigger.name ?? trigger.id ?? `pipeline-${yamlFiles.length + 1}`);
+    const fileName = `${baseName}.yaml`;
+    const filePath = path.join(outputDir, fileName);
+    await writeText(filePath, pipelineYamlFromTrigger(trigger));
+    yamlFiles.push(fileName);
+  }
+
+  await writeJson(path.join(outputDir, "pipeline-metadata.json"), { items: triggers });
+  await writeJson(path.join(outputDir, "pipeline-schedules.json"), { items: schedulerJobs });
+  await writeJson(path.join(outputDir, "index.json"), {
+    resource: "pipelines",
+    generatedAt: new Date().toISOString(),
+    yamlFiles,
+    counts: {
+      pipelines: triggers.length,
+      schedules: schedulerJobs.length,
+    },
+  });
 
   return {
-    fetchedAt: new Date().toISOString(),
-    projectId: config.projectId,
-    location: config.location,
-    pipelineJobs,
-    schedulerJobs
+    pipelineCount: triggers.length,
+    scheduleCount: schedulerJobs.length,
+    yamlFiles,
   };
-}
-
-function renderYaml(data: unknown, indent = 0): string {
-  const pad = "  ".repeat(indent);
-  if (data === null) {
-    return `${pad}null`;
-  }
-  if (typeof data === "string") {
-    return `${pad}"${escapeYamlString(data)}"`;
-  }
-  if (typeof data === "number" || typeof data === "boolean") {
-    return `${pad}${String(data)}`;
-  }
-  if (Array.isArray(data)) {
-    if (data.length === 0) {
-      return `${pad}[]`;
-    }
-    return data
-      .map((item) => {
-        const rendered = renderYaml(item, indent + 1);
-        const trimmed = rendered.trimStart();
-        if (trimmed.startsWith("- ")) {
-          return `${pad}-\n${rendered}`;
-        }
-        return `${pad}- ${trimmed.includes("\n") ? `\n${rendered}` : trimmed}`;
-      })
-      .join("\n");
-  }
-  if (typeof data === "object") {
-    const entries = Object.entries(data as Record<string, unknown>);
-    if (entries.length === 0) {
-      return `${pad}{}`;
-    }
-    return entries
-      .map(([key, value]) => {
-        const rendered = renderYaml(value, indent + 1);
-        const asText = rendered.trimStart();
-        if (asText.includes("\n")) {
-          return `${pad}${key}:\n${rendered}`;
-        }
-        return `${pad}${key}: ${asText}`;
-      })
-      .join("\n");
-  }
-  return `${pad}"${String(data)}"`;
-}
-
-function escapeYamlString(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }

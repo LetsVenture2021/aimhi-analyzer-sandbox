@@ -1,53 +1,36 @@
-import { outputPath, readJsonCommand, safeName, writeJsonFile } from "./gcp_utils";
+import path from "node:path";
+import { IngestContext, normalizeName, runJsonCommand, shellEscape, writeJson } from "./gcp_state_common";
 
-export interface DashboardsFetchConfig {
-  projectId: string;
-  outputRoot: string;
-}
+type DashboardRef = { name?: string; displayName?: string };
 
-export function fetchDashboardsState(config: DashboardsFetchConfig): unknown {
-  const dashboardRoot = outputPath(config.outputRoot, "dashboards");
-  const listResult = readJsonCommand(`gcloud monitoring dashboards list --project=${config.projectId} --format=json`);
-  writeJsonFile(outputPath(dashboardRoot, "dashboard-list.json"), listResult);
+export async function fetchDashboardState(context: IngestContext): Promise<Record<string, unknown>> {
+  const outputDir = path.join(context.outputRoot, "dashboards");
+  const projectEscaped = shellEscape(context.projectId);
 
-  const dashboards = Array.isArray(listResult.payload) ? listResult.payload : [];
-  const details = dashboards.map((dashboard) => {
-    const displayName = extractDashboardName(dashboard);
-    const dashboardName = extractDashboardResource(dashboard);
-    const description = dashboardName
-      ? readJsonCommand(`gcloud monitoring dashboards describe ${dashboardName} --project=${config.projectId} --format=json`)
-      : { command: "", ok: false, fetchedAt: new Date().toISOString(), payload: { error: "missing dashboard name" } };
-    const structured = {
-      fetchedAt: new Date().toISOString(),
-      displayName,
-      dashboardName,
-      dashboardJson: description
-    };
-    writeJsonFile(outputPath(dashboardRoot, `${safeName(displayName || dashboardName || "dashboard")}.json`), structured);
-    return structured;
+  const dashboardRefsRaw = await runJsonCommand(`gcloud monitoring dashboards list --project=${projectEscaped} --format=json`, true);
+  const dashboardRefs = Array.isArray(dashboardRefsRaw) ? (dashboardRefsRaw as DashboardRef[]) : [];
+  const exportedDashboards = [];
+
+  for (const dashboardRef of dashboardRefs) {
+    if (!dashboardRef.name) {
+      continue;
+    }
+    const dashboard = await runJsonCommand(`gcloud monitoring dashboards describe ${shellEscape(dashboardRef.name)} --project=${projectEscaped} --format=json`, true);
+    const dashboardId = dashboardRef.name.split("/").pop() ?? dashboardRef.name;
+    const dashboardName = normalizeName(`${dashboardRef.displayName ?? "dashboard"}-${dashboardId}`);
+    const fileName = `${dashboardName}.json`;
+    await writeJson(path.join(outputDir, fileName), dashboard);
+    exportedDashboards.push({ name: dashboardRef.name, displayName: dashboardRef.displayName ?? dashboardRef.name, fileName });
+  }
+
+  await writeJson(path.join(outputDir, "grafana-index.json"), {
+    resource: "dashboards",
+    generatedAt: new Date().toISOString(),
+    items: exportedDashboards,
   });
 
-  const summary = {
-    fetchedAt: new Date().toISOString(),
-    projectId: config.projectId,
-    dashboards: details
+  return {
+    dashboardCount: exportedDashboards.length,
+    files: exportedDashboards.map((item) => item.fileName),
   };
-  writeJsonFile(outputPath(dashboardRoot, "dashboard-index.json"), summary);
-  return summary;
-}
-
-function extractDashboardName(payload: unknown): string {
-  if (!payload || typeof payload !== "object") {
-    return "";
-  }
-  const value = (payload as Record<string, unknown>).displayName;
-  return typeof value === "string" ? value : "";
-}
-
-function extractDashboardResource(payload: unknown): string {
-  if (!payload || typeof payload !== "object") {
-    return "";
-  }
-  const value = (payload as Record<string, unknown>).name;
-  return typeof value === "string" ? value : "";
 }

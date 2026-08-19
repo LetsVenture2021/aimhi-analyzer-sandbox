@@ -1,108 +1,62 @@
-import { outputPath, parseCsvEnv, readJsonCommand, safeName, writeJsonFile } from "./gcp_utils";
+import path from "node:path";
+import { IngestContext, runJsonCommand, shellEscape, writeJson } from "./gcp_state_common";
 
-export interface BigQueryFetchConfig {
-  projectId: string;
-  datasets: string[];
-  outputRoot: string;
-}
+type DatasetRef = { id?: string; datasetReference?: { datasetId?: string } };
+type TableRef = { tableReference?: { tableId?: string } };
 
-export function defaultBigQueryConfigFromEnv(outputRoot: string): BigQueryFetchConfig {
-  return {
-    projectId: process.env.GCP_PROJECT_ID || "",
-    datasets: parseCsvEnv(process.env.GCP_BQ_DATASETS),
-    outputRoot
-  };
-}
+export async function fetchBigQueryState(context: IngestContext): Promise<Record<string, unknown>> {
+  const outputDir = path.join(context.outputRoot, "bigquery");
+  const projectEscaped = shellEscape(context.projectId);
 
-export function fetchBigQueryState(config: BigQueryFetchConfig): unknown {
-  const bigQueryRoot = outputPath(config.outputRoot, "bigquery");
-  const datasets =
-    config.datasets.length > 0
-      ? config.datasets
-      : extractDatasetIds(readJsonCommand(`gcloud alpha bq datasets list --project=${config.projectId} --format=json`).payload);
+  const datasetsRaw = await runJsonCommand(`bq --project_id=${projectEscaped} ls --format=prettyjson`, true);
+  const datasets = Array.isArray(datasetsRaw) ? (datasetsRaw as DatasetRef[]) : [];
 
-  const datasetRecords = datasets.map((datasetId) => {
-    const datasetMetadata = readJsonCommand(
-      `gcloud alpha bq datasets describe ${datasetId} --project=${config.projectId} --format=json`
-    );
-    const tables = extractTableIds(
-      readJsonCommand(
-        `gcloud alpha bq tables list --dataset=${datasetId} --project=${config.projectId} --format=json`
-      ).payload
-    );
-    const tableMetadata = tables.map((tableId) => {
-      const tableRecord = readJsonCommand(
-        `gcloud alpha bq tables describe ${tableId} --dataset=${datasetId} --project=${config.projectId} --format=json`
-      );
-      writeJsonFile(outputPath(bigQueryRoot, `table-${safeName(datasetId)}-${safeName(tableId)}.json`), tableRecord);
-      return { tableId, tableRecord };
-    });
-    const datasetRecord = {
-      datasetId,
-      datasetMetadata,
-      tables: tableMetadata
-    };
-    writeJsonFile(outputPath(bigQueryRoot, `dataset-${safeName(datasetId)}.json`), datasetRecord);
-    return datasetRecord;
+  const datasetMetadata = [];
+  const tableSchemas = [];
+  const tableMetadata = [];
+
+  for (const dataset of datasets) {
+    const datasetId = dataset.datasetReference?.datasetId ?? dataset.id?.split(":")[1];
+    if (!datasetId) {
+      continue;
+    }
+    const fqDataset = `${context.projectId}:${datasetId}`;
+    const datasetDetails = await runJsonCommand(`bq --project_id=${projectEscaped} show --format=prettyjson ${shellEscape(fqDataset)}`, true);
+    datasetMetadata.push({ datasetId, metadata: datasetDetails });
+
+    const tablesRaw = await runJsonCommand(`bq --project_id=${projectEscaped} ls --format=prettyjson ${shellEscape(fqDataset)}`, true);
+    const tables = Array.isArray(tablesRaw) ? (tablesRaw as TableRef[]) : [];
+    for (const table of tables) {
+      const tableId = table.tableReference?.tableId;
+      if (!tableId) {
+        continue;
+      }
+      const fqTable = `${context.projectId}:${datasetId}.${tableId}`;
+      const tableDetails = await runJsonCommand(`bq --project_id=${projectEscaped} show --format=prettyjson ${shellEscape(fqTable)}`, true);
+      tableMetadata.push({ datasetId, tableId, metadata: tableDetails });
+      const schema = typeof tableDetails === "object" && tableDetails !== null ? (tableDetails as { schema?: unknown }).schema ?? {} : {};
+      tableSchemas.push({ datasetId, tableId, schema });
+    }
+  }
+
+  await writeJson(path.join(outputDir, "dataset-metadata.json"), { items: datasetMetadata });
+  await writeJson(path.join(outputDir, "table-schemas.json"), { items: tableSchemas });
+  await writeJson(path.join(outputDir, "table-metadata.json"), { items: tableMetadata });
+  await writeJson(path.join(outputDir, "index.json"), {
+    resource: "bigquery",
+    generatedAt: new Date().toISOString(),
+    counts: {
+      datasets: datasetMetadata.length,
+      tableSchemas: tableSchemas.length,
+      tableMetadata: tableMetadata.length,
+    },
   });
 
-  const summary = {
-    fetchedAt: new Date().toISOString(),
-    projectId: config.projectId,
-    datasets: datasetRecords
+  return {
+    counts: {
+      datasets: datasetMetadata.length,
+      tableSchemas: tableSchemas.length,
+      tableMetadata: tableMetadata.length,
+    },
   };
-  writeJsonFile(outputPath(bigQueryRoot, "bigquery-index.json"), summary);
-  return summary;
-}
-
-function extractDatasetIds(payload: unknown): string[] {
-  if (!Array.isArray(payload)) {
-    return [];
-  }
-  const values: string[] = [];
-  for (const entry of payload) {
-    if (!entry || typeof entry !== "object") {
-      continue;
-    }
-    const asRecord = entry as Record<string, unknown>;
-    const direct = asRecord.datasetId;
-    if (typeof direct === "string" && direct.length > 0) {
-      values.push(direct);
-      continue;
-    }
-    const ref = asRecord.datasetReference;
-    if (ref && typeof ref === "object") {
-      const nested = (ref as Record<string, unknown>).datasetId;
-      if (typeof nested === "string" && nested.length > 0) {
-        values.push(nested);
-      }
-    }
-  }
-  return values;
-}
-
-function extractTableIds(payload: unknown): string[] {
-  if (!Array.isArray(payload)) {
-    return [];
-  }
-  const values: string[] = [];
-  for (const entry of payload) {
-    if (!entry || typeof entry !== "object") {
-      continue;
-    }
-    const asRecord = entry as Record<string, unknown>;
-    const direct = asRecord.tableId;
-    if (typeof direct === "string" && direct.length > 0) {
-      values.push(direct);
-      continue;
-    }
-    const ref = asRecord.tableReference;
-    if (ref && typeof ref === "object") {
-      const nested = (ref as Record<string, unknown>).tableId;
-      if (typeof nested === "string" && nested.length > 0) {
-        values.push(nested);
-      }
-    }
-  }
-  return values;
 }
